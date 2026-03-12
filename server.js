@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
+const supabase = require("./supabaseClient");
 
 const app = express();
 app.use(bodyParser.json());
@@ -24,17 +25,47 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// Receive messages
+// Receive WhatsApp messages
 app.post("/webhook", async (req, res) => {
+
   console.log("Incoming:", JSON.stringify(req.body, null, 2));
 
   try {
+
+    // Extract message from WhatsApp webhook JSON
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (message) {
-      const from = message.from;
 
+      const from = message.from;
+      const text = message.text?.body || "";
+
+      console.log("Customer:", from);
+      console.log("Message:", text);
+
+      // Save message to Supabase database
+      await supabase
+        .from("messages")
+        .insert([
+          {
+            customer_phone: from,
+            message_text: text,
+            message_type: "text",
+            direction: "incoming"
+          }
+        ]);
+
+      // Update conversation list
+      await supabase
+        .from("conversations")
+        .upsert({
+          customer_phone: from,
+          last_message: text,
+          last_message_time: new Date()
+        });
+
+      // Send reply back to WhatsApp
       await axios.post(
         `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
         {
@@ -51,14 +82,23 @@ app.post("/webhook", async (req, res) => {
           },
         }
       );
+
     }
+
   } catch (error) {
-    console.error("Error sending reply:", error.response?.data || error.message);
+
+    console.error(
+      "Error processing message:",
+      error.response?.data || error.message
+    );
+
   }
 
   res.sendStatus(200);
+
 });
 
+// Root test route
 app.get("/", (req, res) => {
   res.send("PipePal backend running");
 });
