@@ -1,0 +1,3 @@
+Today I will build the core feature:
+👉 Automatic plumbing quote generation from WhatsApp conversations and 
+AI's analyzes of plumbing photos
