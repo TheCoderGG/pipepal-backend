@@ -2,19 +2,20 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
+const fs = require("fs");
+
 const supabase = require("./supabaseClient");
 const generateQuote = require("./generateQuote");
 const analyzePlumbingPhoto = require("./analyzePlumbingPhoto");
-const app = express();
 const transcribeVoice = require("./transcribeVoice");
-const fs = require("fs");
+
+const app = express();
 app.use(bodyParser.json());
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// Webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -28,98 +29,149 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// Receive WhatsApp messages
 app.post("/webhook", async (req, res) => {
 
   console.log("Incoming:", JSON.stringify(req.body, null, 2));
 
   try {
 
-    // Extract message from WhatsApp webhook JSON
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-	  
-	  if (message?.type === "image") {
 
-  const imageId = message.image.id;
+    if (!message) {
+      return res.sendStatus(200);
+    }
 
-  console.log("Customer sent image:", imageId);
+    const from = message.from;
+    let text = message.text?.body || "";
 
-}    if (message) {
+    console.log("Customer:", from);
+    console.log("Message:", text);
 
-      const from = message.from;
-      const text = message.text?.body || "";
-	  let problem = "unknown";
+    let problem = "unknown";
 
-if (text.toLowerCase().includes("blocked"))
-  problem = "blocked drain";
+    // -------- TEXT MESSAGE --------
+    if (message.type === "text") {
 
-if (text.toLowerCase().includes("leak"))
-  problem = "leaking pipe";
+      if (text.toLowerCase().includes("blocked"))
+        problem = "blocked drain";
 
-if (text.toLowerCase().includes("geyser"))
-  problem = "geyser problem";
+      if (text.toLowerCase().includes("leak"))
+        problem = "leaking pipe";
 
-if (text.toLowerCase().includes("tap"))
-  problem = "tap problem";
+      if (text.toLowerCase().includes("geyser"))
+        problem = "geyser problem";
 
-const quote = generateQuote(problem);
-if (quote) {
+      if (text.toLowerCase().includes("tap"))
+        problem = "tap problem";
+    }
 
-  await supabase
-    .from("quotes")
-    .insert([
-      {
+    // -------- IMAGE MESSAGE --------
+    if (message.type === "image") {
+
+      const imageId = message.image.id;
+
+      const imageResponse = await axios.get(
+        `https://graph.facebook.com/v18.0/${imageId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${WHATSAPP_TOKEN}`
+          }
+        }
+      );
+
+      const imageUrl = imageResponse.data.url;
+
+      problem = await analyzePlumbingPhoto(imageUrl);
+
+      text = `Photo detected problem: ${problem}`;
+    }
+
+    // -------- VOICE NOTE --------
+    if (message.type === "audio") {
+
+      const audioId = message.audio.id;
+
+      const audioResponse = await axios.get(
+        `https://graph.facebook.com/v18.0/${audioId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${WHATSAPP_TOKEN}`
+          }
+        }
+      );
+
+      const audioUrl = audioResponse.data.url;
+
+      const audioFile = await axios.get(audioUrl, {
+        responseType: "arraybuffer",
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`
+        }
+      });
+
+      fs.writeFileSync("voice.ogg", audioFile.data);
+
+      text = await transcribeVoice("voice.ogg");
+
+      console.log("Voice message text:", text);
+
+      if (text.toLowerCase().includes("blocked"))
+        problem = "blocked drain";
+
+      if (text.toLowerCase().includes("leak"))
+        problem = "leaking pipe";
+
+      if (text.toLowerCase().includes("geyser"))
+        problem = "geyser problem";
+    }
+
+    const quote = generateQuote(problem);
+
+    // Save message
+    await supabase
+      .from("messages")
+      .insert([
+        {
+          customer_phone: from,
+          message_text: text,
+          message_type: message.type,
+          direction: "incoming"
+        }
+      ]);
+
+    // Update conversation
+    await supabase
+      .from("conversations")
+      .upsert({
         customer_phone: from,
-        problem_type: problem,
-        materials_estimate: quote.materials,
-        callout_fee: quote.callout,
-        total_low: quote.totalLow,
-        total_high: quote.totalHigh
-      }
-	  
-if (message?.type === "audio") {
+        last_message: text,
+        last_message_time: new Date()
+      });
 
-  const audioId = message.audio.id;
+    // Save quote
+    if (quote) {
 
-  console.log("Customer sent voice note:", audioId);
-
-}
-    ]);
-
-}
-
-      console.log("Customer:", from);
-      console.log("Message:", text);
-
-      // Save message to Supabase database
       await supabase
-        .from("messages")
+        .from("quotes")
         .insert([
           {
             customer_phone: from,
-            message_text: text,
-            message_type: "text",
-            direction: "incoming"
+            problem_type: problem,
+            materials_estimate: quote.materials,
+            callout_fee: quote.callout,
+            total_low: quote.totalLow,
+            total_high: quote.totalHigh
           }
         ]);
+    }
 
-      // Update conversation list
-      await supabase
-        .from("conversations")
-        .upsert({
-          customer_phone: from,
-          last_message: text,
-          last_message_time: new Date()
-        });
-		
-		let replyText =
-		
-"👋 Hi! Thanks for contacting PipePal. Please describe your plumbing problem.";
+    let replyText =
+      "👋 Hi! Thanks for contacting PipePal. Please describe your plumbing problem.";
 
-if (quote) {
+    if (quote) {
 
-  replyText =
+      replyText =
 `PipePal Estimate
 
 Issue: ${problem}
@@ -131,28 +183,22 @@ Estimated Total:
 R${quote.totalLow} – R${quote.totalHigh}
 
 Reply YES to book the job.`;
-
-}
-
-      // Send reply back to WhatsApp
-      await axios.post(
-        `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: "whatsapp",
-          to: from,
-          text: {
-            body: "👋 Hi! Thanks for contacting PipePal. A plumber will assist you shortly.",
-          },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
     }
+
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: from,
+        text: { body: replyText }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
 
   } catch (error) {
 
@@ -160,14 +206,11 @@ Reply YES to book the job.`;
       "Error processing message:",
       error.response?.data || error.message
     );
-
   }
 
   res.sendStatus(200);
-
 });
 
-// Root test route
 app.get("/", (req, res) => {
   res.send("PipePal backend running");
 });
@@ -176,42 +219,4 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-});
-
-const audioResponse = await axios.get(
-  `https://graph.facebook.com/v18.0/${audioId}`,
-  {
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`
-    }
-  }
-);
-
-const audioResponse = await axios.get(
-  `https://graph.facebook.com/v18.0/${audioId}`,
-  {
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`
-    }
-  }
-);
-
-const audioUrl = audioResponse.data.url;
-
-const audioFile = await axios.get(audioUrl, {
-  responseType: "arraybuffer",
-  headers: {
-    Authorization: `Bearer ${WHATSAPP_TOKEN}`
-  }
-});
-
-fs.writeFileSync("voice.ogg", audioFile.data);
-
-const text = await transcribeVoice("voice.ogg");
-
-console.log("Voice message text:", text);
-
-const problem = detectPlumbingProblem(text);
-
-const quote = generateQuote(problem);
 });
