@@ -1,9 +1,12 @@
 require("dotenv").config();
+
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
+
 const supabase = require("./supabaseClient");
 const generateQuote = require("./generateQuote");
+const analyzePlumbingPhoto = require("./analyzePlumbingPhoto");
 
 const app = express();
 app.use(bodyParser.json());
@@ -12,7 +15,12 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
+////////////////////////////////////////////////////
+// Webhook verification
+////////////////////////////////////////////////////
+
 app.get("/webhook", (req, res) => {
+
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -23,7 +31,12 @@ app.get("/webhook", (req, res) => {
   } else {
     res.sendStatus(403);
   }
+
 });
+
+////////////////////////////////////////////////////
+// Receive WhatsApp messages
+////////////////////////////////////////////////////
 
 app.post("/webhook", async (req, res) => {
 
@@ -34,156 +47,147 @@ app.post("/webhook", async (req, res) => {
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (message) {
+    if (!message) {
+      return res.sendStatus(200);
+    }
 
-      const from = message.from;
-      const text =
-  message.text?.body ||
-  message.interactive?.button_reply?.id ||
-  "";
+    const from = message.from;
 
-      console.log("Customer:", from);
-      console.log("Message:", text);
+    const text =
+      message.text?.body ||
+      message.interactive?.button_reply?.id ||
+      "";
 
-      let replyText = "";
+    let replyText = "";
 
-      // Detect basic plumbing problem
-      let problem = "unknown";
+////////////////////////////////////////////////////
+// BUTTON CLICK: SEND PHOTO
+////////////////////////////////////////////////////
 
-      if (text.toLowerCase().includes("blocked"))
-        problem = "blocked drain";
+    if (text === "send_photo") {
 
-      if (text.toLowerCase().includes("leak"))
-        problem = "leaking pipe";
+      replyText =
+"📷 Please send a clear photo of the plumbing problem.";
 
-      if (text.toLowerCase().includes("geyser"))
-        problem = "geyser problem";
+    }
 
-      if (text.toLowerCase().includes("tap"))
-        problem = "tap problem";
+////////////////////////////////////////////////////
+// CUSTOMER SENT IMAGE
+////////////////////////////////////////////////////
 
-      // CHECK IF SESSION EXISTS
-      const { data: session } = await supabase
-        .from("job_sessions")
-        .select("*")
-        .eq("customer_phone", from)
-        .single();
+    else if (message.type === "image") {
 
-      // START NEW SESSION
-      if (!session && problem !== "unknown") {
+      const imageId = message.image.id;
 
-        await supabase
-          .from("job_sessions")
-          .insert([
-            {
-              customer_phone: from,
-              problem_type: problem,
-              stage: "question1"
-            }
-          ]);
+      console.log("Image received:", imageId);
 
-        replyText =
-`Where is the problem?
+      // Get image URL from WhatsApp
+      const imageResponse = await axios.get(
+        `https://graph.facebook.com/v18.0/${imageId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${WHATSAPP_TOKEN}`
+          }
+        }
+      );
 
-1 Under sink
-2 Wall pipe
-3 Outside pipe
-4 Ceiling`;
+      const imageUrl = imageResponse.data.url;
 
-      }
+      console.log("Image URL:", imageUrl);
 
-      // QUESTION 1 ANSWERED
-      else if (session && session.stage === "question1") {
+      // Send image to AI
+      const problem = await analyzePlumbingPhoto(imageUrl);
 
-        await supabase
-          .from("job_sessions")
-          .update({
-            answer1: text,
-            stage: "question2"
-          })
-          .eq("customer_phone", from);
+      console.log("AI detected problem:", problem);
 
-        replyText =
-`How serious is the problem?
+      const quote = generateQuote(problem);
 
-1 Dripping
-2 Steady leak
-3 Pipe burst`;
+      replyText =
+`PipePal AI Diagnosis
 
-      }
+Problem detected:
+${problem}
 
-      // QUESTION 2 ANSWERED → GENERATE QUOTE
-      else if (session && session.stage === "question2") {
-
-        await supabase
-          .from("job_sessions")
-          .update({
-            answer2: text,
-            stage: "quote_sent"
-          })
-          .eq("customer_phone", from);
-
-        const quote = generateQuote(session.problem_type);
-
-        await supabase
-          .from("quotes")
-          .insert([
-            {
-              customer_phone: from,
-              problem_type: session.problem_type,
-              materials_estimate: quote.materials,
-              callout_fee: quote.callout,
-              total_low: quote.totalLow,
-              total_high: quote.totalHigh
-            }
-          ]);
-
-        replyText =
-`PipePal Estimate
-
-Issue: ${session.problem_type}
-
-Call-out: R${quote.callout}
-Materials: R${quote.materials}
-
-Estimated Total:
+Estimated repair cost:
 R${quote.totalLow} – R${quote.totalHigh}
 
-Reply YES to book the job.`;
+Reply YES to book a plumber.`;
 
-      }
+    }
 
-      else {
+////////////////////////////////////////////////////
+// NORMAL TEXT MESSAGE
+////////////////////////////////////////////////////
 
-        replyText =
-"👋 Hi! Please describe your plumbing problem (leak, blocked drain, geyser etc).";
+    else {
 
-      }
+      replyText =
+"👋 Hi! I'm PipePal.\n\nYou can describe your plumbing problem or send a photo.";
 
-      // SEND MESSAGE BACK TO WHATSAPP
+      // Send photo button
       await axios.post(
         `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: "whatsapp",
           to: from,
-          text: {
-            body: replyText,
-          },
+          type: "interactive",
+          interactive: {
+            type: "button",
+            body: {
+              text: replyText
+            },
+            action: {
+              buttons: [
+                {
+                  type: "reply",
+                  reply: {
+                    id: "send_photo",
+                    title: "📷 Send Photo"
+                  }
+                }
+              ]
+            }
+          }
         },
         {
           headers: {
             Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json",
-          },
+            "Content-Type": "application/json"
+          }
         }
       );
 
+      return res.sendStatus(200);
+
     }
 
-  } catch (error) {
+////////////////////////////////////////////////////
+// SEND NORMAL MESSAGE RESPONSE
+////////////////////////////////////////////////////
+
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: from,
+        text: {
+          body: replyText
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+  }
+
+  catch (error) {
 
     console.error(
-      "Error processing message:",
+      "Webhook error:",
       error.response?.data || error.message
     );
 
@@ -193,9 +197,17 @@ Reply YES to book the job.`;
 
 });
 
+////////////////////////////////////////////////////
+// Root route
+////////////////////////////////////////////////////
+
 app.get("/", (req, res) => {
   res.send("PipePal backend running");
 });
+
+////////////////////////////////////////////////////
+// Start server
+////////////////////////////////////////////////////
 
 const PORT = process.env.PORT || 3000;
 
