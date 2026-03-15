@@ -37,7 +37,10 @@ app.post("/webhook", async (req, res) => {
     if (message) {
 
       const from = message.from;
-      const text = message.text?.body || "";
+      const text =
+  message.text?.body ||
+  message.interactive?.button_reply?.id ||
+  "";
 
       console.log("Customer:", from);
       console.log("Message:", text);
