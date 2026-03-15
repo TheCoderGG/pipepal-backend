@@ -2,12 +2,8 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
-const fs = require("fs");
-
 const supabase = require("./supabaseClient");
 const generateQuote = require("./generateQuote");
-const analyzePlumbingPhoto = require("./analyzePlumbingPhoto");
-const transcribeVoice = require("./transcribeVoice");
 
 const app = express();
 app.use(bodyParser.json());
@@ -38,20 +34,18 @@ app.post("/webhook", async (req, res) => {
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
+    if (message) {
 
-    const from = message.from;
-    let text = message.text?.body || "";
+      const from = message.from;
+      const text = message.text?.body || "";
 
-    console.log("Customer:", from);
-    console.log("Message:", text);
+      console.log("Customer:", from);
+      console.log("Message:", text);
 
-    let problem = "unknown";
+      let replyText = "";
 
-    // -------- TEXT MESSAGE --------
-    if (message.type === "text") {
+      // Detect basic plumbing problem
+      let problem = "unknown";
 
       if (text.toLowerCase().includes("blocked"))
         problem = "blocked drain";
@@ -64,117 +58,87 @@ app.post("/webhook", async (req, res) => {
 
       if (text.toLowerCase().includes("tap"))
         problem = "tap problem";
-    }
 
-    // -------- IMAGE MESSAGE --------
-    if (message.type === "image") {
+      // CHECK IF SESSION EXISTS
+      const { data: session } = await supabase
+        .from("job_sessions")
+        .select("*")
+        .eq("customer_phone", from)
+        .single();
 
-      const imageId = message.image.id;
+      // START NEW SESSION
+      if (!session && problem !== "unknown") {
 
-      const imageResponse = await axios.get(
-        `https://graph.facebook.com/v18.0/${imageId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`
-          }
-        }
-      );
+        await supabase
+          .from("job_sessions")
+          .insert([
+            {
+              customer_phone: from,
+              problem_type: problem,
+              stage: "question1"
+            }
+          ]);
 
-      const imageUrl = imageResponse.data.url;
+        replyText =
+`Where is the problem?
 
-      problem = await analyzePlumbingPhoto(imageUrl);
+1 Under sink
+2 Wall pipe
+3 Outside pipe
+4 Ceiling`;
 
-      text = `Photo detected problem: ${problem}`;
-    }
+      }
 
-    // -------- VOICE NOTE --------
-    if (message.type === "audio") {
+      // QUESTION 1 ANSWERED
+      else if (session && session.stage === "question1") {
 
-      const audioId = message.audio.id;
+        await supabase
+          .from("job_sessions")
+          .update({
+            answer1: text,
+            stage: "question2"
+          })
+          .eq("customer_phone", from);
 
-      const audioResponse = await axios.get(
-        `https://graph.facebook.com/v18.0/${audioId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`
-          }
-        }
-      );
+        replyText =
+`How serious is the problem?
 
-      const audioUrl = audioResponse.data.url;
+1 Dripping
+2 Steady leak
+3 Pipe burst`;
 
-      const audioFile = await axios.get(audioUrl, {
-        responseType: "arraybuffer",
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`
-        }
-      });
+      }
 
-      fs.writeFileSync("voice.ogg", audioFile.data);
+      // QUESTION 2 ANSWERED → GENERATE QUOTE
+      else if (session && session.stage === "question2") {
 
-      text = await transcribeVoice("voice.ogg");
+        await supabase
+          .from("job_sessions")
+          .update({
+            answer2: text,
+            stage: "quote_sent"
+          })
+          .eq("customer_phone", from);
 
-      console.log("Voice message text:", text);
+        const quote = generateQuote(session.problem_type);
 
-      if (text.toLowerCase().includes("blocked"))
-        problem = "blocked drain";
+        await supabase
+          .from("quotes")
+          .insert([
+            {
+              customer_phone: from,
+              problem_type: session.problem_type,
+              materials_estimate: quote.materials,
+              callout_fee: quote.callout,
+              total_low: quote.totalLow,
+              total_high: quote.totalHigh
+            }
+          ]);
 
-      if (text.toLowerCase().includes("leak"))
-        problem = "leaking pipe";
-
-      if (text.toLowerCase().includes("geyser"))
-        problem = "geyser problem";
-    }
-
-    const quote = generateQuote(problem);
-
-    // Save message
-    await supabase
-      .from("messages")
-      .insert([
-        {
-          customer_phone: from,
-          message_text: text,
-          message_type: message.type,
-          direction: "incoming"
-        }
-      ]);
-
-    // Update conversation
-    await supabase
-      .from("conversations")
-      .upsert({
-        customer_phone: from,
-        last_message: text,
-        last_message_time: new Date()
-      });
-
-    // Save quote
-    if (quote) {
-
-      await supabase
-        .from("quotes")
-        .insert([
-          {
-            customer_phone: from,
-            problem_type: problem,
-            materials_estimate: quote.materials,
-            callout_fee: quote.callout,
-            total_low: quote.totalLow,
-            total_high: quote.totalHigh
-          }
-        ]);
-    }
-
-    let replyText =
-      "👋 Hi! Thanks for contacting PipePal. Please describe your plumbing problem.";
-
-    if (quote) {
-
-      replyText =
+        replyText =
 `PipePal Estimate
 
-Issue: ${problem}
+Issue: ${session.problem_type}
 
 Call-out: R${quote.callout}
 Materials: R${quote.materials}
@@ -183,22 +147,35 @@ Estimated Total:
 R${quote.totalLow} – R${quote.totalHigh}
 
 Reply YES to book the job.`;
-    }
 
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: from,
-        text: { body: replyText }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
-        }
       }
-    );
+
+      else {
+
+        replyText =
+"👋 Hi! Please describe your plumbing problem (leak, blocked drain, geyser etc).";
+
+      }
+
+      // SEND MESSAGE BACK TO WHATSAPP
+      await axios.post(
+        `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: "whatsapp",
+          to: from,
+          text: {
+            body: replyText,
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+    }
 
   } catch (error) {
 
@@ -206,9 +183,11 @@ Reply YES to book the job.`;
       "Error processing message:",
       error.response?.data || error.message
     );
+
   }
 
   res.sendStatus(200);
+
 });
 
 app.get("/", (req, res) => {
