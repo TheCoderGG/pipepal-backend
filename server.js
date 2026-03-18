@@ -29,7 +29,7 @@ function wait(ms) {
 ////////////////////////////////////////////////////
 
 app.get("/webhook", (req, res) => {
-
+console.log("➡️ Webhook hit:", new Date().toISOString());
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -40,7 +40,7 @@ app.get("/webhook", (req, res) => {
   }
 
   res.sendStatus(403);
-
+console.log("✅ Response sent");
 });
 
 ////////////////////////////////////////////////////
