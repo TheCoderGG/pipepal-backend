@@ -6,3 +6,7 @@ const supabase = createClient(
 );
 
 module.exports = supabase;
+
+if (!process.env.SUPABASE_URL) {
+  throw new Error("Missing SUPABASE_URL in environment variables");
+}
