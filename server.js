@@ -16,11 +16,13 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
+
 ////////////////////////////////////////////////////
-// SEND WHATSAPP
+// Helper to send WhatsApp messages
 ////////////////////////////////////////////////////
 
 async function sendWhatsApp(to, text) {
+
   await axios.post(
     `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
     {
@@ -35,6 +37,7 @@ async function sendWhatsApp(to, text) {
       }
     }
   );
+
 }
 
 ////////////////////////////////////////////////////
@@ -169,31 +172,56 @@ What is the problem?
 
     if (session.step === 1 && !session.problem_type) {
 
-      const problemMap = {
-        "1": "leak",
-        "2": "blocked",
-        "3": "geyser",
-        "4": "tap"
-      };
+  const problemMap = {
+    "1": "leak",
+    "2": "blocked",
+    "3": "geyser",
+    "4": "tap"
+  };
 
-      const problem = problemMap[text] || text;
+  const problem = problemMap[text] || text;
 
-      await supabase
-        .from("job_sessions")
-        .update({
-          problem_type: problem,
-          step: 2
-        })
-        .eq("customer_phone", from);
+  await supabase
+    .from("job_sessions")
+    .update({
+      problem_type: problem,
+      step: 2
+    })
+    .eq("customer_phone", from);
 
-      return res.sendStatus(200);
-    }
+  // ✅ IMMEDIATE RESPONSE
+  await sendWhatsApp(
+    from,
+    "Got it 👍 Let me ask a few quick questions to give you an accurate quote."
+  );
+
+  // ✅ IMPORTANT: DO NOT RETURN YET
+  session.problem_type = problem;
+  session.step = 2;
+}
 
     ////////////////////////////////////////////////////
     // DYNAMIC QUESTIONS
     ////////////////////////////////////////////////////
 
     if (session.step >= 2) {
+
+  if (!session.problem_type) {
+    await sendWhatsApp(from, "Please choose a problem first.");
+    return res.sendStatus(200);
+  }
+
+  const { data: questions } = await supabase
+    .from("questions")
+    .select("*")
+    .eq("problem_type", session.problem_type)
+    .order("step", { ascending: true });
+
+  if (!questions || questions.length === 0) {
+    await sendWhatsApp(from, "No questions configured yet.");
+    return res.sendStatus(200);
+  }
+  {
 
       const { data: questions } = await supabase
         .from("questions")
@@ -281,9 +309,9 @@ Reply YES to book a plumber.`
       return res.sendStatus(200);
     }
 
-  } catch (error) {
-    console.error("Webhook error:", error.message);
-  }
+ } catch (error) {
+  console.error("FULL ERROR:", error);
+}
 
   res.sendStatus(200);
 });
