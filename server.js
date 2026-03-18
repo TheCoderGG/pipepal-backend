@@ -17,19 +17,31 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 ////////////////////////////////////////////////////
-// Utility delay
+// SEND WHATSAPP
 ////////////////////////////////////////////////////
 
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function sendWhatsApp(to, text) {
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      text: { body: text }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
 }
 
 ////////////////////////////////////////////////////
-// Webhook verification
+// WEBHOOK VERIFY
 ////////////////////////////////////////////////////
 
 app.get("/webhook", (req, res) => {
-console.log("➡️ Webhook hit:", new Date().toISOString());
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -40,25 +52,20 @@ console.log("➡️ Webhook hit:", new Date().toISOString());
   }
 
   res.sendStatus(403);
-console.log("✅ Response sent");
 });
 
 ////////////////////////////////////////////////////
-// Receive WhatsApp messages
+// MAIN WEBHOOK
 ////////////////////////////////////////////////////
 
 app.post("/webhook", async (req, res) => {
-
   console.log("Incoming:", JSON.stringify(req.body, null, 2));
 
   try {
-
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
+    if (!message) return res.sendStatus(200);
 
     const from = message.from;
 
@@ -68,16 +75,29 @@ app.post("/webhook", async (req, res) => {
       "";
 
     ////////////////////////////////////////////////////
-    // Cancel followups if user replies
+    // LOAD SESSION
     ////////////////////////////////////////////////////
 
-    await supabase
-      .from("followups")
-      .delete()
-      .eq("customer_phone", from);
+    let { data: session } = await supabase
+      .from("job_sessions")
+      .select("*")
+      .eq("customer_phone", from)
+      .single();
+
+    if (!session) {
+      await supabase.from("job_sessions").insert([
+        {
+          customer_phone: from,
+          step: 0,
+          answers: {}
+        }
+      ]);
+
+      session = { step: 0, answers: {} };
+    }
 
     ////////////////////////////////////////////////////
-    // IMAGE MESSAGE
+    // IMAGE HANDLING (AI BOOST)
     ////////////////////////////////////////////////////
 
     if (message.type === "image") {
@@ -95,321 +115,193 @@ app.post("/webhook", async (req, res) => {
 
       const imageUrl = imageResponse.data.url;
 
-      await axios.post(
-        `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: "whatsapp",
-          to: from,
-          text: { body: "🔎 Analyzing plumbing photo..." }
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json"
-          }
-        }
+      await sendWhatsApp(from, "🔎 Analyzing photo...");
+
+      const aiProblem = await analyzePlumbingPhoto(imageUrl);
+
+      await supabase
+        .from("job_sessions")
+        .update({
+          problem_type: aiProblem,
+          step: 1
+        })
+        .eq("customer_phone", from);
+
+      await sendWhatsApp(
+        from,
+`I detected: ${aiProblem}
+
+Let me ask a few quick questions to give you an accurate quote.`
       );
 
-      await wait(2000);
+      return res.sendStatus(200);
+    }
 
-      const problem = await analyzePlumbingPhoto(imageUrl);
+    ////////////////////////////////////////////////////
+    // STEP 0 – SELECT PROBLEM TYPE
+    ////////////////////////////////////////////////////
 
-      const quote = generateQuote(problem);
+    if (session.step === 0) {
 
-      const replyText = `PipePal Diagnosis
+      await sendWhatsApp(
+        from,
+`👋 Hi! I'm PipePal ZA
 
-Problem detected:
-${problem}
+What is the problem?
 
-Estimated repair cost:
-R${quote.totalLow} – R${quote.totalHigh}
-
-Reply YES to book the job.`;
-
-      await axios.post(
-        `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: "whatsapp",
-          to: from,
-          text: { body: replyText }
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json"
-          }
-        }
+1️⃣ Leak
+2️⃣ Blocked drain
+3️⃣ Geyser
+4️⃣ Tap`
       );
 
       await supabase
-        .from("followups")
-        .insert([{ customer_phone: from, sent: false }]);
+        .from("job_sessions")
+        .update({ step: 1 })
+        .eq("customer_phone", from);
 
       return res.sendStatus(200);
-
     }
 
-////////////////////////////////////////////////////
-// SEND PHOTO BUTTON CLICK
-////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////
+    // STEP 1 – SAVE PROBLEM TYPE
+    ////////////////////////////////////////////////////
 
-if (text === "send_photo") {
+    if (session.step === 1 && !session.problem_type) {
 
-  await sendWhatsApp(
-    from,
-    "📷 Please send a clear photo of the plumbing problem."
-  );
+      const problemMap = {
+        "1": "leak",
+        "2": "blocked",
+        "3": "geyser",
+        "4": "tap"
+      };
 
-  return res.sendStatus(200);
+      const problem = problemMap[text] || text;
 
-}
+      await supabase
+        .from("job_sessions")
+        .update({
+          problem_type: problem,
+          step: 2
+        })
+        .eq("customer_phone", from);
+
+      return res.sendStatus(200);
+    }
 
     ////////////////////////////////////////////////////
-    // BOOKING FLOW
+    // DYNAMIC QUESTIONS
+    ////////////////////////////////////////////////////
+
+    if (session.step >= 2) {
+
+      const { data: questions } = await supabase
+        .from("questions")
+        .select("*")
+        .eq("problem_type", session.problem_type)
+        .order("step", { ascending: true });
+
+      const questionIndex = session.step - 2;
+
+      // SAVE previous answer
+      if (questions[questionIndex - 1]) {
+
+        const field = questions[questionIndex - 1].field;
+
+        const updatedAnswers = {
+          ...session.answers,
+          [field]: text
+        };
+
+        await supabase
+          .from("job_sessions")
+          .update({
+            answers: updatedAnswers
+          })
+          .eq("customer_phone", from);
+
+        session.answers = updatedAnswers;
+      }
+
+      // ASK NEXT QUESTION
+      if (questions[questionIndex]) {
+
+        await sendWhatsApp(from, questions[questionIndex].question);
+
+        await supabase
+          .from("job_sessions")
+          .update({ step: session.step + 1 })
+          .eq("customer_phone", from);
+
+        return res.sendStatus(200);
+      }
+
+      ////////////////////////////////////////////////////
+      // GENERATE FINAL QUOTE
+      ////////////////////////////////////////////////////
+
+      const quote = generateQuote(session.problem_type, session.answers);
+
+      if (!quote) {
+        await sendWhatsApp(from, "I need a bit more info.");
+        return res.sendStatus(200);
+      }
+
+      await sendWhatsApp(
+        from,
+`💰 PipePal Estimate
+
+Problem: ${session.problem_type}
+
+Estimated:
+R${quote.totalLow} – R${quote.totalHigh}
+
+Reply YES to book a plumber.`
+      );
+
+      await supabase
+        .from("job_sessions")
+        .update({ step: 99 })
+        .eq("customer_phone", from);
+
+      return res.sendStatus(200);
+    }
+
+    ////////////////////////////////////////////////////
+    // BOOKING
     ////////////////////////////////////////////////////
 
     if (text === "yes") {
 
-      const reply =
-`Great 👍 When would you like the plumber to come?
-
-1️⃣ Tomorrow morning (08:00–10:00)
-2️⃣ Tomorrow afternoon (13:00–15:00)
-3️⃣ Friday morning (08:00–10:00)`;
-
-      await sendWhatsApp(from, reply);
-
-      return res.sendStatus(200);
-
-    }
-
-    if (text === "1") {
-
-      await supabase
-        .from("appointments")
-        .insert([
-          {
-            customer_phone: from,
-            appointment_time: "Tomorrow 08:00–10:00"
-          }
-        ]);
-
-      const { data: plumber } = await supabase
-        .from("plumber_profile")
-        .select("*")
-        .limit(1)
-        .single();
-
       await sendWhatsApp(
         from,
-`✅ Appointment booked!
-
-${plumber.name} will contact you shortly.
-
-Plumber phone:
-${plumber.phone}`
-      );
-
-      await sendWhatsApp(
-        plumber.phone,
-`🚨 New appointment booked
-
-Customer: ${from}
-Time: Tomorrow 08:00–10:00`
+"When would you like the plumber?\n1️⃣ Tomorrow morning\n2️⃣ Afternoon"
       );
 
       return res.sendStatus(200);
-
     }
-if (text && message.type === "text") {
-
-  const problem = text;
-
-  const quote = generateQuote(problem);
-
-  const reply =
-`PipePal quick estimate
-
-Problem:
-${problem}
-
-Estimated repair cost:
-R${quote.totalLow} – R${quote.totalHigh}
-
-📷 Send a photo for a more accurate quote.
-Reply YES to book a plumber.`;
-
-  await sendWhatsApp(from, reply);
-
-  return res.sendStatus(200);
-
-}
-    ////////////////////////////////////////////////////
-    // DEFAULT MESSAGE
-    ////////////////////////////////////////////////////
-
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: from,
-        type: "interactive",
-        interactive: {
-          type: "button",
-          body: {
-            text:
-"👋 Hi! I'm PipePal.\n\nDescribe your plumbing problem or send a photo."
-          },
-          action: {
-            buttons: [
-              {
-                type: "reply",
-                reply: {
-                  id: "send_photo",
-                  title: "📷 Send Photo"
-                }
-              }
-            ]
-          }
-        }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
 
   } catch (error) {
-
-    console.error(
-      "Webhook error:",
-      error.response?.data || error.message
-    );
-
+    console.error("Webhook error:", error.message);
   }
 
   res.sendStatus(200);
-
 });
 
 ////////////////////////////////////////////////////
-// Helper to send WhatsApp messages
-////////////////////////////////////////////////////
-
-async function sendWhatsApp(to, text) {
-
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      text: { body: text }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-
-}
-
-////////////////////////////////////////////////////
-// Follow-up reminder system
-////////////////////////////////////////////////////
-
-async function checkFollowUps() {
-
-  const { data: rows } = await supabase
-    .from("followups")
-    .select("*")
-    .eq("sent", false);
-
-  for (const row of rows) {
-
-    const created = new Date(row.created_at);
-    const now = new Date();
-
-    const minutes = (now - created) / 1000 / 60;
-
-    if (minutes > 30) {
-
-      await sendWhatsApp(
-        row.customer_phone,
-"👋 Just checking if you still need help with that plumbing problem. Reply YES to book the job."
-      );
-
-      await supabase
-        .from("followups")
-        .update({ sent: true })
-        .eq("id", row.id);
-
-    }
-
-  }
-
-}
-
-////////////////////////////////////////////////////
-// Daily schedule
-////////////////////////////////////////////////////
-
-async function sendDailySchedule() {
-
-  const today = new Date().toISOString().split("T")[0];
-
-  const { data: jobs } = await supabase
-    .from("appointments")
-    .select("*")
-    .gte("created_at", today);
-
-  if (!jobs || jobs.length === 0) return;
-
-  let schedule = "📅 PipePal Daily Job List\n\n";
-
-  for (const job of jobs) {
-
-    schedule += `${job.appointment_time}
-Customer: ${job.customer_phone}
-
-`;
-
-  }
-
-  const { data: plumber } = await supabase
-    .from("plumber_profile")
-    .select("*")
-    .limit(1)
-    .single();
-
-  await sendWhatsApp(plumber.phone, schedule);
-
-}
-
-////////////////////////////////////////////////////
-// Root route
+// ROOT
 ////////////////////////////////////////////////////
 
 app.get("/", (req, res) => {
-  res.send("PipePal backend running");
+  res.send("PipePal ZA running");
 });
 
 ////////////////////////////////////////////////////
-// Start server
+// START
 ////////////////////////////////////////////////////
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-});
-
-setInterval(checkFollowUps, 600000);
-
-cron.schedule("0 6 * * *", () => {
-  console.log("Sending PipePal daily schedule...");
-  sendDailySchedule();
 });
