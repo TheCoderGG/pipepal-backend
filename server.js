@@ -221,7 +221,29 @@ Time: Tomorrow 08:00–10:00`
       return res.sendStatus(200);
 
     }
+if (text && message.type === "text") {
 
+  const problem = text;
+
+  const quote = generateQuote(problem);
+
+  const reply =
+`PipePal quick estimate
+
+Problem:
+${problem}
+
+Estimated repair cost:
+R${quote.totalLow} – R${quote.totalHigh}
+
+📷 Send a photo for a more accurate quote.
+Reply YES to book a plumber.`;
+
+  await sendWhatsApp(from, reply);
+
+  return res.sendStatus(200);
+
+}
     ////////////////////////////////////////////////////
     // DEFAULT MESSAGE
     ////////////////////////////////////////////////////
