@@ -190,7 +190,7 @@ What is the problem?
     // DYNAMIC QUESTIONS
     ////////////////////////////////////////////////////
 
-    if (session.step >= 2) {
+if (session.step >= 2) {
 
   if (!session.problem_type) {
     await sendWhatsApp(from, "Please choose a problem first.");
@@ -207,62 +207,55 @@ What is the problem?
     await sendWhatsApp(from, "No questions configured yet.");
     return res.sendStatus(200);
   }
-  {
 
-      const { data: questions } = await supabase
-        .from("questions")
-        .select("*")
-        .eq("problem_type", session.problem_type)
-        .order("step", { ascending: true });
+  const questionIndex = session.step - 2;
 
-      const questionIndex = session.step - 2;
+  // SAVE previous answer
+  if (questions[questionIndex - 1]) {
 
-      // SAVE previous answer
-      if (questions[questionIndex - 1]) {
+    const field = questions[questionIndex - 1].field;
 
-        const field = questions[questionIndex - 1].field;
+    const updatedAnswers = {
+      ...session.answers,
+      [field]: text
+    };
 
-        const updatedAnswers = {
-          ...session.answers,
-          [field]: text
-        };
+    await supabase
+      .from("job_sessions")
+      .update({
+        answers: updatedAnswers
+      })
+      .eq("customer_phone", from);
 
-        await supabase
-          .from("job_sessions")
-          .update({
-            answers: updatedAnswers
-          })
-          .eq("customer_phone", from);
+    session.answers = updatedAnswers;
+  }
 
-        session.answers = updatedAnswers;
-      }
+  // ASK NEXT QUESTION
+  if (questions[questionIndex]) {
 
-      // ASK NEXT QUESTION
-      if (questions[questionIndex]) {
+    await sendWhatsApp(from, questions[questionIndex].question);
 
-        await sendWhatsApp(from, questions[questionIndex].question);
+    await supabase
+      .from("job_sessions")
+      .update({ step: session.step + 1 })
+      .eq("customer_phone", from);
 
-        await supabase
-          .from("job_sessions")
-          .update({ step: session.step + 1 })
-          .eq("customer_phone", from);
+    return res.sendStatus(200);
+  }
 
-        return res.sendStatus(200);
-      }
+  ////////////////////////////////////////////////////
+  // GENERATE FINAL QUOTE
+  ////////////////////////////////////////////////////
 
-      ////////////////////////////////////////////////////
-      // GENERATE FINAL QUOTE
-      ////////////////////////////////////////////////////
+  const quote = generateQuote(session.problem_type, session.answers);
 
-      const quote = generateQuote(session.problem_type, session.answers);
+  if (!quote) {
+    await sendWhatsApp(from, "I need a bit more info.");
+    return res.sendStatus(200);
+  }
 
-      if (!quote) {
-        await sendWhatsApp(from, "I need a bit more info.");
-        return res.sendStatus(200);
-      }
-
-      await sendWhatsApp(
-        from,
+  await sendWhatsApp(
+    from,
 `💰 PipePal Estimate
 
 Problem: ${session.problem_type}
@@ -271,15 +264,15 @@ Estimated:
 R${quote.totalLow} – R${quote.totalHigh}
 
 Reply YES to book a plumber.`
-      );
+  );
 
-      await supabase
-        .from("job_sessions")
-        .update({ step: 99 })
-        .eq("customer_phone", from);
+  await supabase
+    .from("job_sessions")
+    .update({ step: 99 })
+    .eq("customer_phone", from);
 
-      return res.sendStatus(200);
-    }
+  return res.sendStatus(200);
+}
 
     ////////////////////////////////////////////////////
     // BOOKING
@@ -287,15 +280,15 @@ Reply YES to book a plumber.`
 
     if (text === "yes") {
 
-      await sendWhatsApp(
-        from,
+  await sendWhatsApp(
+    from,
 "When would you like the plumber?\n1️⃣ Tomorrow morning\n2️⃣ Afternoon"
-      );
+  );
 
-      return res.sendStatus(200);
-    }
+  return res.sendStatus(200);
+}
 
- } catch (error) {
+} catch (error) {
   console.error("FULL ERROR:", error);
 }
 
