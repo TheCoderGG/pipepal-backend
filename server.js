@@ -37,17 +37,19 @@ app.get("/webhook", (req, res) => {
 // MAIN WEBHOOK
 ////////////////////////////////////////////////////
 
-app.post("/webhook", async (req, res) => {  
+app.post("/webhook", async (req, res) => {
 
-  try { 
-	
   console.log("Incoming:", JSON.stringify(req.body, null, 2));
 
   try {
+
     const message =
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) return res.sendStatus(200);
+    if (!message) {
+      console.log("⚠️ No message found");
+      return res.sendStatus(200);
+    }
 
     const from = message.from;
 
@@ -55,13 +57,23 @@ app.post("/webhook", async (req, res) => {
       message.text?.body?.toLowerCase() ||
       message.interactive?.button_reply?.id ||
       "";
- } catch (error) {
 
-    console.error("FULL ERROR:", error);
+    console.log("🔥 MESSAGE RECEIVED");
+    console.log("FROM:", from);
+    console.log("TEXT:", text);
+    console.log("TYPE:", message.type);
+
+    // 🚨 FORCE TEST MESSAGE
+    await sendWhatsApp(from, "✅ PipePal is alive");
+
+  } catch (error) {
+
+    console.error("❌ WEBHOOK ERROR:", error);
 
   }
 
   res.sendStatus(200);
+});
   
     ////////////////////////////////////////////////////
     // LOAD SESSION
