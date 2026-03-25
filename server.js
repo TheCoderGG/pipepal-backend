@@ -37,7 +37,10 @@ app.get("/webhook", (req, res) => {
 // MAIN WEBHOOK
 ////////////////////////////////////////////////////
 
-app.post("/webhook", async (req, res) => {
+app.post("/webhook", async (req, res) => {  
+
+  try { 
+	
   console.log("Incoming:", JSON.stringify(req.body, null, 2));
 
   try {
@@ -52,7 +55,14 @@ app.post("/webhook", async (req, res) => {
       message.text?.body?.toLowerCase() ||
       message.interactive?.button_reply?.id ||
       "";
+ } catch (error) {
 
+    console.error("FULL ERROR:", error);
+
+  }
+
+  res.sendStatus(200);
+  
     ////////////////////////////////////////////////////
     // LOAD SESSION
     ////////////////////////////////////////////////////
@@ -289,7 +299,7 @@ Reply YES to book a plumber.`
   console.error("FULL ERROR:", error);
 }
 
-  res.sendStatus(200);
+res.sendStatus(200);
 });
 
 ////////////////////////////////////////////////////
