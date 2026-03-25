@@ -16,30 +16,6 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-
-////////////////////////////////////////////////////
-// Helper to send WhatsApp messages
-////////////////////////////////////////////////////
-
-async function sendWhatsApp(to, text) {
-
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      text: { body: text }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-
-}
-
 ////////////////////////////////////////////////////
 // WEBHOOK VERIFY
 ////////////////////////////////////////////////////
@@ -315,6 +291,41 @@ Reply YES to book a plumber.`
 
   res.sendStatus(200);
 });
+
+////////////////////////////////////////////////////
+// Helper to send WhatsApp messages (DEBUG VERSION)
+////////////////////////////////////////////////////
+
+async function sendWhatsApp(to, text) {
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        text: { body: text }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("✅ Message sent:", JSON.stringify(response.data, null, 2));
+
+  } catch (err) {
+
+    console.error("❌ SEND ERROR FULL:");
+
+    console.error({
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message
+    });
+  }
+}
 
 ////////////////////////////////////////////////////
 // ROOT
