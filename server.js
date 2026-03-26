@@ -44,24 +44,27 @@ app.post("/webhook", async (req, res) => {
   try {
 
     const message =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!message) {
-      console.log("⚠️ No message found");
-      return res.sendStatus(200);
-    }
+// 🔥 IMPORTANT: ignore status updates
+if (!message) {
+  console.log("⚠️ Status update (no message)");
+  return res.sendStatus(200);
+}
 
-    const from = message.from;
+const from = message.from;
 
-    const text =
-      message.text?.body?.toLowerCase() ||
-      message.interactive?.button_reply?.id ||
-      "";
+const text =
+  message.text?.body?.toLowerCase() ||
+  message.interactive?.button_reply?.id ||
+  "";
 
-    console.log("🔥 MESSAGE RECEIVED");
-    console.log("FROM:", from);
-    console.log("TEXT:", text);
-    console.log("TYPE:", message.type);
+  console.log("🔥 MESSAGE RECEIVED");
+  console.log("FROM:", from);
+  console.log("TEXT:", text);
+
+// ✅ FORCE TEST REPLY
+    await sendWhatsApp(from, "🔥 PipePal reply test");
 
     ////////////////////////////////////////////////////
     // LOAD SESSION
