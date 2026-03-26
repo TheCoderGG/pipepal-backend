@@ -63,18 +63,6 @@ app.post("/webhook", async (req, res) => {
     console.log("TEXT:", text);
     console.log("TYPE:", message.type);
 
-    // 🚨 FORCE TEST MESSAGE
-    await sendWhatsApp(from, "✅ PipePal is alive");
-
-  } catch (error) {
-
-    console.error("❌ WEBHOOK ERROR:", error);
-
-  }
-
-  res.sendStatus(200);
-});
-  
     ////////////////////////////////////////////////////
     // LOAD SESSION
     ////////////////////////////////////////////////////
@@ -98,48 +86,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     ////////////////////////////////////////////////////
-    // IMAGE HANDLING (AI BOOST)
-    ////////////////////////////////////////////////////
-
-    if (message.type === "image") {
-
-      const imageId = message.image.id;
-
-      const imageResponse = await axios.get(
-        `https://graph.facebook.com/v18.0/${imageId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_TOKEN}`
-          }
-        }
-      );
-
-      const imageUrl = imageResponse.data.url;
-
-      await sendWhatsApp(from, "🔎 Analyzing photo...");
-
-      const aiProblem = await analyzePlumbingPhoto(imageUrl);
-
-      await supabase
-        .from("job_sessions")
-        .update({
-          problem_type: aiProblem,
-          step: 1
-        })
-        .eq("customer_phone", from);
-
-      await sendWhatsApp(
-        from,
-`I detected: ${aiProblem}
-
-Let me ask a few quick questions to give you an accurate quote.`
-      );
-
-      return res.sendStatus(200);
-    }
-
-    ////////////////////////////////////////////////////
-    // STEP 0 – SELECT PROBLEM TYPE
+    // STEP 0 – GREETING
     ////////////////////////////////////////////////////
 
     if (session.step === 0) {
@@ -165,126 +112,80 @@ What is the problem?
     }
 
     ////////////////////////////////////////////////////
-    // STEP 1 – SAVE PROBLEM TYPE
+    // STEP 1 – SAVE PROBLEM
     ////////////////////////////////////////////////////
 
     if (session.step === 1 && !session.problem_type) {
 
-  const problemMap = {
-    "1": "leak",
-    "2": "blocked",
-    "3": "geyser",
-    "4": "tap"
-  };
+      const problemMap = {
+        "1": "leak",
+        "2": "blocked",
+        "3": "geyser",
+        "4": "tap"
+      };
 
-  const problem = problemMap[text] || text;
+      const problem = problemMap[text] || text;
 
-  await supabase
-    .from("job_sessions")
-    .update({
-      problem_type: problem,
-      step: 2
-    })
-    .eq("customer_phone", from);
+      await supabase
+        .from("job_sessions")
+        .update({
+          problem_type: problem,
+          step: 2
+        })
+        .eq("customer_phone", from);
 
-  // ✅ IMMEDIATE RESPONSE
-  await sendWhatsApp(
-    from,
-    "Got it 👍 Let me ask a few quick questions to give you an accurate quote."
-  );
+      await sendWhatsApp(
+        from,
+        "Got it 👍 Let me ask a few quick questions."
+      );
 
-  // ✅ IMPORTANT: DO NOT RETURN YET
-  session.problem_type = problem;
-  session.step = 2;
-}
+      session.problem_type = problem;
+      session.step = 2;
+    }
 
     ////////////////////////////////////////////////////
     // DYNAMIC QUESTIONS
     ////////////////////////////////////////////////////
 
-if (session.step >= 2) {
+    if (session.step >= 2) {
 
-  if (!session.problem_type) {
-    await sendWhatsApp(from, "Please choose a problem first.");
-    return res.sendStatus(200);
-  }
+      const { data: questions } = await supabase
+        .from("questions")
+        .select("*")
+        .eq("problem_type", session.problem_type)
+        .order("step", { ascending: true });
 
-  const { data: questions } = await supabase
-    .from("questions")
-    .select("*")
-    .eq("problem_type", session.problem_type)
-    .order("step", { ascending: true });
+      if (!questions || questions.length === 0) {
+        await sendWhatsApp(from, "No questions configured.");
+        return res.sendStatus(200);
+      }
 
-  if (!questions || questions.length === 0) {
-    await sendWhatsApp(from, "No questions configured yet.");
-    return res.sendStatus(200);
-  }
+      const index = session.step - 2;
 
-  const questionIndex = session.step - 2;
+      if (questions[index]) {
 
-  // SAVE previous answer
-  if (questions[questionIndex - 1]) {
+        await sendWhatsApp(from, questions[index].question);
 
-    const field = questions[questionIndex - 1].field;
+        await supabase
+          .from("job_sessions")
+          .update({ step: session.step + 1 })
+          .eq("customer_phone", from);
 
-    const updatedAnswers = {
-      ...session.answers,
-      [field]: text
-    };
+        return res.sendStatus(200);
+      }
 
-    await supabase
-      .from("job_sessions")
-      .update({
-        answers: updatedAnswers
-      })
-      .eq("customer_phone", from);
+      const quote = generateQuote(session.problem_type, session.answers);
 
-    session.answers = updatedAnswers;
-  }
-
-  // ASK NEXT QUESTION
-  if (questions[questionIndex]) {
-
-    await sendWhatsApp(from, questions[questionIndex].question);
-
-    await supabase
-      .from("job_sessions")
-      .update({ step: session.step + 1 })
-      .eq("customer_phone", from);
-
-    return res.sendStatus(200);
-  }
-
-  ////////////////////////////////////////////////////
-  // GENERATE FINAL QUOTE
-  ////////////////////////////////////////////////////
-
-  const quote = generateQuote(session.problem_type, session.answers);
-
-  if (!quote) {
-    await sendWhatsApp(from, "I need a bit more info.");
-    return res.sendStatus(200);
-  }
-
-  await sendWhatsApp(
-    from,
-`💰 PipePal Estimate
-
-Problem: ${session.problem_type}
-
-Estimated:
+      await sendWhatsApp(
+        from,
+`💰 Estimate:
 R${quote.totalLow} – R${quote.totalHigh}
 
-Reply YES to book a plumber.`
-  );
+Reply YES to book.`
+      );
 
-  await supabase
-    .from("job_sessions")
-    .update({ step: 99 })
-    .eq("customer_phone", from);
-
-  return res.sendStatus(200);
-}
+      return res.sendStatus(200);
+    }
 
     ////////////////////////////////////////////////////
     // BOOKING
@@ -292,19 +193,21 @@ Reply YES to book a plumber.`
 
     if (text === "yes") {
 
-  await sendWhatsApp(
-    from,
-"When would you like the plumber?\n1️⃣ Tomorrow morning\n2️⃣ Afternoon"
-  );
+      await sendWhatsApp(
+        from,
+        "When would you like the plumber?\n1️⃣ Tomorrow\n2️⃣ Afternoon"
+      );
 
-  return res.sendStatus(200);
-}
+      return res.sendStatus(200);
+    }
 
-} catch (error) {
-  console.error("FULL ERROR:", error);
-}
+  } catch (error) {
 
-res.sendStatus(200);
+    console.error("❌ WEBHOOK ERROR:", error);
+
+  }
+
+  res.sendStatus(200);
 });
 
 ////////////////////////////////////////////////////
