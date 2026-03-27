@@ -63,8 +63,39 @@ const text =
   console.log("FROM:", from);
   console.log("TEXT:", text);
 
-// ✅ FORCE TEST REPLY
-    await sendWhatsApp(from, "🔥 PipePal reply test");
+// 👇 START CONVERSATION IF NEW USER
+
+const { data: session } = await supabase
+  .from("job_sessions")
+  .select("*")
+  .eq("customer_phone", from)
+  .single();
+
+// 🆕 No session → start new flow
+if (!session) {
+
+  await supabase.from("job_sessions").insert([
+    {
+      customer_phone: from,
+      step: 1,
+      answers: {}
+    }
+  ]);
+
+  await sendWhatsApp(
+    from,
+`👋 Hi! I'm PipePal ZA 🇿🇦
+
+What problem are you experiencing?
+
+1️⃣ Leak
+2️⃣ Blocked drain
+3️⃣ Geyser issue
+4️⃣ Other`
+  );
+
+  return res.sendStatus(200);
+}
 
     ////////////////////////////////////////////////////
     // LOAD SESSION
@@ -118,34 +149,31 @@ What is the problem?
     // STEP 1 – SAVE PROBLEM
     ////////////////////////////////////////////////////
 
-  if (session.step === 1 && !session.problem_type) {
+// STEP 1 → user selects problem
+if (session.step === 1) {
 
-  const problemMap = {
-    "1": "leak",
-    "2": "blocked",
-    "3": "geyser",
-    "4": "tap"
-  };
+  let problemType = "";
 
-  const problem = problemMap[text] || text;
+  if (text === "1") problemType = "leak";
+  else if (text === "2") problemType = "blocked";
+  else if (text === "3") problemType = "geyser";
+  else problemType = "other";
 
   await supabase
     .from("job_sessions")
     .update({
-      problem_type: problem,
-      step: 2,
-      answers: {}
+      problem_type: problemType,
+      step: 2
     })
     .eq("customer_phone", from);
 
   await sendWhatsApp(
     from,
-    "Got it 👍 Let me ask a few quick questions."
+"Got it 👍 Let me ask a few quick questions..."
   );
 
-  return res.sendStatus(200); // ✅ CRITICAL FIX
+  return res.sendStatus(200);
 }
-
     ////////////////////////////////////////////////////
     // DYNAMIC QUESTIONS
     ////////////////////////////////////////////////////
