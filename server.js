@@ -3,7 +3,6 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
-const cron = require("node-cron");
 
 const supabase = require("./supabaseClient");
 const generateQuote = require("./generateQuote");
@@ -44,100 +43,57 @@ app.post("/webhook", async (req, res) => {
   try {
 
     const message =
-  req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-// 🔥 IMPORTANT: ignore status updates
-if (!message) {
-  console.log("⚠️ Status update (no message)");
-  return res.sendStatus(200);
-}
-
-const from = message.from;
-
-const text =
-  message.text?.body?.toLowerCase() ||
-  message.interactive?.button_reply?.id ||
-  "";
-
-  console.log("🔥 MESSAGE RECEIVED");
-  console.log("FROM:", from);
-  console.log("TEXT:", text);
-
-// 👇 START CONVERSATION IF NEW USER
-
-const { data: session } = await supabase
-  .from("job_sessions")
-  .select("*")
-  .eq("customer_phone", from)
-  .single();
-
-// 🆕 No session → start new flow
-if (!session) {
-
-  await supabase.from("job_sessions").insert([
-    {
-      customer_phone: from,
-      step: 1,
-      answers: {}
+    if (!message) {
+      console.log("⚠️ Status update");
+      return res.sendStatus(200);
     }
-  ]);
 
-  await sendWhatsApp(
-    from,
-`👋 Hi! I'm PipePal ZA 🇿🇦
+    const from = message.from;
 
-What problem are you experiencing?
+    const text =
+      message.text?.body?.toLowerCase() ||
+      message.interactive?.button_reply?.id ||
+      "";
 
-1️⃣ Leak
-2️⃣ Blocked drain
-3️⃣ Geyser issue
-4️⃣ Other`
-  );
+    console.log("FROM:", from);
+    console.log("TEXT:", text);
+    console.log("TYPE:", message.type);
 
-  return res.sendStatus(200);
-}
+    ////////////////////////////////////////////////////
+    // LOAD SESSION (ONLY ONCE)
+    ////////////////////////////////////////////////////
 
-        //////////////////////////////////////////////////// LOAD SESSION (ONLY ONCE)
-		//////////////////////////////////////////
+    let { data: session } = await supabase
+      .from("job_sessions")
+      .select("*")
+      .eq("customer_phone", from)
+      .single();
 
-   let { data: session } = await supabase
-  .from("job_sessions")
-  .select("*")
-  .eq("customer_phone", from)
-  .single();
+    if (!session) {
+      await supabase.from("job_sessions").insert([
+        {
+          customer_phone: from,
+          step: 0,
+          answers: {}
+        }
+      ]);
 
-if (!session) {
-  await supabase.from("job_sessions").insert([
-    {
-      customer_phone: from,
-      step: 0,
-      answers: {}
+      session = { step: 0, answers: {} };
     }
-  ]);
 
-  session = {
-    step: 0,
-    answers: {}
-  };
-}
-
-    ////////////////////////////////////////////////
-    // STEP 0 – GREETING
-	///////////////////////////////////////////////////
+    ////////////////////////////////////////////////////
+    // STEP 0 — GREETING (BUTTONS)
+    ////////////////////////////////////////////////////
 
     if (session.step === 0) {
 
-      await sendWhatsApp(
-        from,
-`👋 Hi! I'm PipePal ZA
-
-What is the problem?
-
-1️⃣ Leak
-2️⃣ Blocked drain
-3️⃣ Geyser
-4️⃣ Tap`
-      );
+      await sendButtons(from, "👋 Hi! I'm PipePal ZA 🇿🇦\n\nWhat problem do you have?", [
+        { id: "leak", title: "Leak" },
+        { id: "blocked", title: "Blocked drain" },
+        { id: "geyser", title: "Geyser" }
+      ]);
 
       await supabase
         .from("job_sessions")
@@ -148,111 +104,137 @@ What is the problem?
     }
 
     ////////////////////////////////////////////////////
-    // STEP 1 – SAVE PROBLEM
+    // STEP 1 — PROBLEM TYPE
     ////////////////////////////////////////////////////
 
-// STEP 1 → user selects problem
-if (session.step === 1) {
+    if (session.step === 1) {
 
-  let problemType = "";
+      await supabase
+        .from("job_sessions")
+        .update({
+          problem_type: text,
+          step: 2
+        })
+        .eq("customer_phone", from);
 
-  if (text === "1") problemType = "leak";
-  else if (text === "2") problemType = "blocked";
-  else if (text === "3") problemType = "geyser";
-  else problemType = "other";
+      await sendWhatsApp(from, "Got it 👍 Let me ask a few quick questions...");
 
-  await supabase
-    .from("job_sessions")
-    .update({
-      problem_type: problemType,
-      step: 2
-    })
-    .eq("customer_phone", from);
+      return res.sendStatus(200);
+    }
 
-  await sendWhatsApp(
-    from,
-"Got it 👍 Let me ask a few quick questions..."
-  );
+    ////////////////////////////////////////////////////
+    // IMAGE HANDLING (COMBINE WITH QUESTIONS)
+    ////////////////////////////////////////////////////
 
-  return res.sendStatus(200);
-}
+    if (message.type === "image") {
+
+      const imageId = message.image.id;
+
+      const imageRes = await axios.get(
+        `https://graph.facebook.com/v18.0/${imageId}`,
+        {
+          headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+        }
+      );
+
+      const imageUrl = imageRes.data.url;
+
+      await sendWhatsApp(from, "🔎 Analyzing your photo...");
+
+      const detectedProblem = await analyzePlumbingPhoto(imageUrl);
+
+      await supabase
+        .from("job_sessions")
+        .update({
+          ai_detected: detectedProblem
+        })
+        .eq("customer_phone", from);
+
+      await sendWhatsApp(
+        from,
+        `I detected: ${detectedProblem}\n\nLet me confirm a few details...`
+      );
+
+      return res.sendStatus(200);
+    }
+
     ////////////////////////////////////////////////////
     // DYNAMIC QUESTIONS
     ////////////////////////////////////////////////////
 
-    if (session.step >= 2) {
+    if (session.step >= 2 && session.step < 99) {
 
-  const { data: questions } = await supabase
-    .from("questions")
-    .select("*")
-    .eq("problem_type", session.problem_type)
-    .order("step", { ascending: true });
+      const { data: questions } = await supabase
+        .from("questions")
+        .select("*")
+        .eq("problem_type", session.problem_type)
+        .order("step", { ascending: true });
 
-  if (!questions || questions.length === 0) {
-    await sendWhatsApp(from, "No questions configured.");
-    return res.sendStatus(200);
-  }
+      if (!questions || questions.length === 0) {
+        await sendWhatsApp(from, "No questions configured.");
+        return res.sendStatus(200);
+      }
 
-  const index = session.step - 2;
+      const index = session.step - 2;
 
-  // ✅ SAVE PREVIOUS ANSWER
-  if (index > 0 && questions[index - 1]) {
+      // SAVE ANSWER
+      if (index > 0 && questions[index - 1]) {
 
-    const field = questions[index - 1].field;
+        const field = questions[index - 1].field;
 
-    const updatedAnswers = {
-      ...session.answers,
-      [field]: text
-    };
+        const updatedAnswers = {
+          ...session.answers,
+          [field]: text
+        };
 
-    await supabase
-      .from("job_sessions")
-      .update({ answers: updatedAnswers })
-      .eq("customer_phone", from);
+        await supabase
+          .from("job_sessions")
+          .update({ answers: updatedAnswers })
+          .eq("customer_phone", from);
 
-    session.answers = updatedAnswers;
-  }
+        session.answers = updatedAnswers;
+      }
 
-  // ✅ ASK NEXT QUESTION
-  if (questions[index]) {
+      // ASK NEXT
+      if (questions[index]) {
 
-    await sendWhatsApp(from, questions[index].question);
+        await sendWhatsApp(from, questions[index].question);
 
-    await supabase
-      .from("job_sessions")
-      .update({ step: session.step + 1 })
-      .eq("customer_phone", from);
+        await supabase
+          .from("job_sessions")
+          .update({ step: session.step + 1 })
+          .eq("customer_phone", from);
 
-    return res.sendStatus(200);
-  }
+        return res.sendStatus(200);
+      }
 
-  // ✅ SAFE QUOTE GENERATION
-  const quote = generateQuote(session.problem_type, session.answers);
+      ////////////////////////////////////////////////////
+      // AI SMART QUOTE
+      ////////////////////////////////////////////////////
 
-  if (!quote || !quote.totalLow) {
-    await sendWhatsApp(from, "I need a bit more info.");
-    return res.sendStatus(200);
-  }
+      const aiProblem = session.ai_detected || session.problem_type;
 
-  await sendWhatsApp(
-    from,
+      const quote = generateQuote(aiProblem, session.answers);
+
+      await sendWhatsApp(
+        from,
 `💰 PipePal Estimate
 
-Problem: ${session.problem_type}
+Problem: ${aiProblem}
 
 Estimated:
 R${quote.totalLow} – R${quote.totalHigh}
 
-Reply YES to book.`
-  );
+Reply YES to book`
+      );
 
-  await supabase
-    .from("job_sessions")
-    .update({ step: 99 })
-    .eq("customer_phone", from);
+      await supabase
+        .from("job_sessions")
+        .update({ step: 99 })
+        .eq("customer_phone", from);
 
-  return res.sendStatus(200);
-}
+      return res.sendStatus(200);
+    }
 
     ////////////////////////////////////////////////////
     // BOOKING
@@ -260,56 +242,75 @@ Reply YES to book.`
 
     if (text === "yes") {
 
-      await sendWhatsApp(
-        from,
-        "When would you like the plumber?\n1️⃣ Tomorrow\n2️⃣ Afternoon"
-      );
+      await sendButtons(from, "When should we come?", [
+        { id: "morning", title: "Morning" },
+        { id: "afternoon", title: "Afternoon" }
+      ]);
 
       return res.sendStatus(200);
     }
 
   } catch (error) {
-
-    console.error("❌ WEBHOOK ERROR:", error);
-
+    console.error("❌ ERROR:", error);
   }
 
   res.sendStatus(200);
 });
 
 ////////////////////////////////////////////////////
-// Helper to send WhatsApp messages (DEBUG VERSION)
+// SEND TEXT
 ////////////////////////////////////////////////////
 
 async function sendWhatsApp(to, text) {
-  try {
-    const response = await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        text: { body: text }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-          "Content-Type": "application/json"
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      text: { body: text }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+////////////////////////////////////////////////////
+// SEND BUTTONS
+////////////////////////////////////////////////////
+
+async function sendButtons(to, text, buttons) {
+
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text },
+        action: {
+          buttons: buttons.map(b => ({
+            type: "reply",
+            reply: {
+              id: b.id,
+              title: b.title
+            }
+          }))
         }
       }
-    );
-
-    console.log("✅ Message sent:", JSON.stringify(response.data, null, 2));
-
-  } catch (err) {
-
-    console.error("❌ SEND ERROR FULL:");
-
-    console.error({
-      status: err.response?.status,
-      data: err.response?.data,
-      message: err.message
-    });
-  }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
 }
 
 ////////////////////////////////////////////////////
@@ -317,7 +318,7 @@ async function sendWhatsApp(to, text) {
 ////////////////////////////////////////////////////
 
 app.get("/", (req, res) => {
-  res.send("PipePal ZA running");
+  res.send("PipePal running");
 });
 
 ////////////////////////////////////////////////////
