@@ -97,31 +97,33 @@ What problem are you experiencing?
   return res.sendStatus(200);
 }
 
-    ////////////////////////////////////////////////////
-    // LOAD SESSION
-    ////////////////////////////////////////////////////
+        //////////////////////////////////////////////////// LOAD SESSION (ONLY ONCE)
+		//////////////////////////////////////////
 
-    let { data: session } = await supabase
-      .from("job_sessions")
-      .select("*")
-      .eq("customer_phone", from)
-      .single();
+   let { data: session } = await supabase
+  .from("job_sessions")
+  .select("*")
+  .eq("customer_phone", from)
+  .single();
 
-    if (!session) {
-      await supabase.from("job_sessions").insert([
-        {
-          customer_phone: from,
-          step: 0,
-          answers: {}
-        }
-      ]);
-
-      session = { step: 0, answers: {} };
+if (!session) {
+  await supabase.from("job_sessions").insert([
+    {
+      customer_phone: from,
+      step: 0,
+      answers: {}
     }
+  ]);
 
-    ////////////////////////////////////////////////////
+  session = {
+    step: 0,
+    answers: {}
+  };
+}
+
+    ////////////////////////////////////////////////
     // STEP 0 – GREETING
-    ////////////////////////////////////////////////////
+	///////////////////////////////////////////////////
 
     if (session.step === 0) {
 
