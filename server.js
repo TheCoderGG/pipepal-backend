@@ -53,7 +53,7 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
 
     const text =
-      message.text?.body?.toLowerCase() ||
+      message.text?.body?.toLowerCase().trim() ||
       message.interactive?.button_reply?.id ||
       "";
 
@@ -62,7 +62,7 @@ app.post("/webhook", async (req, res) => {
     console.log("TYPE:", message.type);
 
     ////////////////////////////////////////////////////
-    // LOAD SESSION (ONLY ONCE)
+    // LOAD SESSION
     ////////////////////////////////////////////////////
 
     let { data: session } = await supabase
@@ -71,14 +71,23 @@ app.post("/webhook", async (req, res) => {
       .eq("customer_phone", from)
       .single();
 
-    if (!session) {
-      await supabase.from("job_sessions").insert([
-        {
-          customer_phone: from,
-          step: 0,
-          answers: {}
-        }
-      ]);
+    // BUG FIX 1: Reset session on greeting words or if no session exists
+    if (!session || text === "restart" || text === "reset" || text === "hi" || text === "hello") {
+
+      if (session) {
+        await supabase
+          .from("job_sessions")
+          .update({ step: 0, answers: {}, problem_type: null, ai_detected: null })
+          .eq("customer_phone", from);
+      } else {
+        await supabase.from("job_sessions").insert([
+          {
+            customer_phone: from,
+            step: 0,
+            answers: {}
+          }
+        ]);
+      }
 
       session = { step: 0, answers: {} };
     }
@@ -123,10 +132,10 @@ app.post("/webhook", async (req, res) => {
     }
 
     ////////////////////////////////////////////////////
-    // IMAGE HANDLING (COMBINE WITH QUESTIONS)
+    // IMAGE HANDLING — BUG FIX 4: guard with step >= 2
     ////////////////////////////////////////////////////
 
-    if (message.type === "image") {
+    if (message.type === "image" && session.step >= 2) {
 
       const imageId = message.image.id;
 
@@ -177,8 +186,8 @@ app.post("/webhook", async (req, res) => {
 
       const index = session.step - 2;
 
-      // SAVE ANSWER
-      if (index > 0 && questions[index - 1]) {
+      // BUG FIX 3: Save answer for ALL questions (index >= 0, not > 0)
+      if (index >= 0 && questions[index - 1]) {
 
         const field = questions[index - 1].field;
 
@@ -195,7 +204,7 @@ app.post("/webhook", async (req, res) => {
         session.answers = updatedAnswers;
       }
 
-      // ASK NEXT
+      // ASK NEXT QUESTION
       if (questions[index]) {
 
         await sendWhatsApp(from, questions[index].question);
@@ -209,8 +218,18 @@ app.post("/webhook", async (req, res) => {
       }
 
       ////////////////////////////////////////////////////
-      // AI SMART QUOTE
+      // ALL QUESTIONS DONE — save last answer, then quote
       ////////////////////////////////////////////////////
+
+      if (questions[index - 1]) {
+        const field = questions[index - 1].field;
+        const updatedAnswers = { ...session.answers, [field]: text };
+        await supabase
+          .from("job_sessions")
+          .update({ answers: updatedAnswers })
+          .eq("customer_phone", from);
+        session.answers = updatedAnswers;
+      }
 
       const aiProblem = session.ai_detected || session.problem_type;
 
@@ -225,7 +244,7 @@ Problem: ${aiProblem}
 Estimated:
 R${quote.totalLow} – R${quote.totalHigh}
 
-Reply YES to book`
+Reply YES to book or RESTART to start over`
       );
 
       await supabase
@@ -237,15 +256,40 @@ Reply YES to book`
     }
 
     ////////////////////////////////////////////////////
-    // BOOKING
+    // BOOKING — BUG FIX 2: step 99 and 100 properly handled
     ////////////////////////////////////////////////////
 
-    if (text === "yes") {
+    if (session.step === 99) {
 
-      await sendButtons(from, "When should we come?", [
-        { id: "morning", title: "Morning" },
-        { id: "afternoon", title: "Afternoon" }
-      ]);
+      if (text === "yes") {
+
+        await sendButtons(from, "When should we come?", [
+          { id: "morning", title: "Morning" },
+          { id: "afternoon", title: "Afternoon" }
+        ]);
+
+        await supabase
+          .from("job_sessions")
+          .update({ step: 100 })
+          .eq("customer_phone", from);
+
+        return res.sendStatus(200);
+      }
+    }
+
+    if (session.step === 100) {
+
+      const timeSlot = text; // "morning" or "afternoon" from button reply
+
+      await supabase
+        .from("job_sessions")
+        .update({ time_slot: timeSlot, step: 101 })
+        .eq("customer_phone", from);
+
+      await sendWhatsApp(
+        from,
+        `✅ Booked! A plumber will contact you to confirm your ${timeSlot} appointment.\n\nThank you for using PipePal ZA 🇿🇦`
+      );
 
       return res.sendStatus(200);
     }
