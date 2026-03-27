@@ -217,6 +217,8 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
+		console.log("SESSION:", session);
+		console.log("QUESTIONS:", questions);
       ////////////////////////////////////////////////////
       // ALL QUESTIONS DONE — save last answer, then quote
       ////////////////////////////////////////////////////
