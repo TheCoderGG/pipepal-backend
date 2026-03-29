@@ -52,7 +52,7 @@ app.post("/webhook", async (req, res) => {
 
     const from = message.from;
 
-    // Button replies come through as-is; text messages are lowercased
+    // Button replies come as-is; text is lowercased
     const isButtonReply = !!message.interactive?.button_reply?.id;
     const text = isButtonReply
       ? message.interactive.button_reply.id
@@ -78,15 +78,12 @@ app.post("/webhook", async (req, res) => {
     const isGreeting = ["hi", "hello", "hey", "start", "restart", "reset"].includes(text);
 
     if (!session) {
-      // No session at all — create a fresh one
       await supabase.from("job_sessions").insert([
         { customer_phone: from, step: 0, answers: {} }
       ]);
       session = { step: 0, answers: {} };
       console.log("SESSION CREATED for:", from);
-
     } else if (isGreeting) {
-      // Session exists but user wants to restart — reset it
       await supabase
         .from("job_sessions")
         .update({ step: 0, answers: {}, problem_type: null, ai_detected: null })
@@ -98,7 +95,7 @@ app.post("/webhook", async (req, res) => {
     console.log("CURRENT STEP:", session.step);
 
     ////////////////////////////////////////////////////
-    // STEP 0 — GREETING (BUTTONS)
+    // STEP 0 — GREETING
     ////////////////////////////////////////////////////
 
     if (session.step === 0) {
@@ -119,7 +116,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     ////////////////////////////////////////////////////
-    // STEP 1 — CAPTURE PROBLEM TYPE FROM BUTTON
+    // STEP 1 — CAPTURE PROBLEM TYPE
     ////////////////////////////////////////////////////
 
     if (session.step === 1) {
@@ -138,7 +135,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     ////////////////////////////////////////////////////
-    // IMAGE HANDLING (only after problem type is set)
+    // IMAGE HANDLING
     ////////////////////////////////////////////////////
 
     if (message.type === "image" && session.step >= 2) {
@@ -182,7 +179,6 @@ app.post("/webhook", async (req, res) => {
 
       console.log("QUESTIONS FOUND:", questions?.length ?? 0);
       if (qError) console.log("QUESTIONS ERROR:", qError.message);
-      if (questions) console.log("QUESTIONS DATA:", JSON.stringify(questions));
 
       if (!questions || questions.length === 0) {
         console.log("⚠️ No questions for:", session.problem_type);
@@ -195,7 +191,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       const index = session.step - 2;
-      console.log("QUESTION INDEX:", index);
+      console.log("QUESTION INDEX:", index, "| Total questions:", questions.length);
 
       // Save the answer to the previous question
       if (index > 0 && questions[index - 1]) {
@@ -209,14 +205,29 @@ app.post("/webhook", async (req, res) => {
         console.log("SAVED ANSWER:", field, "=", text);
       }
 
-      // Ask the next question
+      // Ask the next question (or send with buttons if options exist)
       if (questions[index]) {
-        await sendWhatsApp(from, questions[index].question);
+        const q = questions[index];
+
+        // options column: stored as comma-separated string e.g. "Kitchen,Bathroom,Outside,Other"
+        const options = q.options
+          ? q.options.split(",").map(o => o.trim()).filter(Boolean)
+          : [];
+
+        if (options.length >= 2 && options.length <= 3) {
+          // Send as buttons (WhatsApp max 3 buttons)
+          await sendButtons(from, q.question, options.map(o => ({ id: o.toLowerCase().replace(/\s+/g, "_"), title: o })));
+        } else {
+          // Send as plain text
+          await sendWhatsApp(from, q.question);
+        }
+
         await supabase
           .from("job_sessions")
           .update({ step: session.step + 1 })
           .eq("customer_phone", from);
-        console.log("ASKED:", questions[index].question, "→ step", session.step + 1);
+
+        console.log("ASKED Q:", q.question, "→ step", session.step + 1);
         return res.sendStatus(200);
       }
 
@@ -224,7 +235,10 @@ app.post("/webhook", async (req, res) => {
       // ALL QUESTIONS DONE — save last answer then quote
       ////////////////////////////////////////////////////
 
-      if (questions[index - 1]) {
+      console.log("ALL QUESTIONS DONE — generating quote");
+
+      // Save the final answer
+      if (index > 0 && questions[index - 1]) {
         const field = questions[index - 1].field;
         const updatedAnswers = { ...session.answers, [field]: text };
         await supabase
@@ -232,7 +246,7 @@ app.post("/webhook", async (req, res) => {
           .update({ answers: updatedAnswers })
           .eq("customer_phone", from);
         session.answers = updatedAnswers;
-        console.log("SAVED LAST ANSWER:", field, "=", text);
+        console.log("SAVED FINAL ANSWER:", field, "=", text);
       }
 
       const aiProblem = session.ai_detected || session.problem_type;
@@ -304,7 +318,7 @@ Reply YES to book or RESTART to start over`
       return res.sendStatus(200);
     }
 
-    console.log("No handler matched for step:", session.step, "text:", text);
+    console.log("No handler matched — step:", session.step, "text:", text);
 
   } catch (error) {
     console.error("❌ ERROR:", error.message);
@@ -336,7 +350,7 @@ async function sendWhatsApp(to, body) {
 }
 
 ////////////////////////////////////////////////////
-// SEND BUTTONS
+// SEND BUTTONS (max 3)
 ////////////////////////////////////////////////////
 
 async function sendButtons(to, bodyText, buttons) {
@@ -351,9 +365,9 @@ async function sendButtons(to, bodyText, buttons) {
           type: "button",
           body: { text: bodyText },
           action: {
-            buttons: buttons.map(b => ({
+            buttons: buttons.slice(0, 3).map(b => ({
               type: "reply",
-              reply: { id: b.id, title: b.title }
+              reply: { id: b.id, title: b.title.substring(0, 20) }
             }))
           }
         }
