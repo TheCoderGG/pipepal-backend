@@ -46,19 +46,21 @@ app.post("/webhook", async (req, res) => {
       req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (!message) {
-      console.log("⚠️ Status update");
+      console.log("⚠️ Status update — ignoring");
       return res.sendStatus(200);
     }
 
     const from = message.from;
 
-    const text =
-      message.text?.body?.toLowerCase().trim() ||
-      message.interactive?.button_reply?.id ||
-      "";
+    // Button replies come through as-is; text messages are lowercased
+    const isButtonReply = !!message.interactive?.button_reply?.id;
+    const text = isButtonReply
+      ? message.interactive.button_reply.id
+      : (message.text?.body?.toLowerCase().trim() || "");
 
     console.log("FROM:", from);
     console.log("TEXT:", text);
+    console.log("IS_BUTTON_REPLY:", isButtonReply);
     console.log("TYPE:", message.type);
 
     ////////////////////////////////////////////////////
@@ -71,26 +73,29 @@ app.post("/webhook", async (req, res) => {
       .eq("customer_phone", from)
       .single();
 
-    // BUG FIX 1: Reset session on greeting words or if no session exists
-    if (!session || text === "restart" || text === "reset" || text === "hi" || text === "hello") {
+    console.log("SESSION LOADED:", JSON.stringify(session));
 
-      if (session) {
-        await supabase
-          .from("job_sessions")
-          .update({ step: 0, answers: {}, problem_type: null, ai_detected: null })
-          .eq("customer_phone", from);
-      } else {
-        await supabase.from("job_sessions").insert([
-          {
-            customer_phone: from,
-            step: 0,
-            answers: {}
-          }
-        ]);
-      }
+    const isGreeting = ["hi", "hello", "hey", "start", "restart", "reset"].includes(text);
 
+    if (!session) {
+      // No session at all — create a fresh one
+      await supabase.from("job_sessions").insert([
+        { customer_phone: from, step: 0, answers: {} }
+      ]);
       session = { step: 0, answers: {} };
+      console.log("SESSION CREATED for:", from);
+
+    } else if (isGreeting) {
+      // Session exists but user wants to restart — reset it
+      await supabase
+        .from("job_sessions")
+        .update({ step: 0, answers: {}, problem_type: null, ai_detected: null })
+        .eq("customer_phone", from);
+      session = { step: 0, answers: {} };
+      console.log("SESSION RESET for:", from);
     }
+
+    console.log("CURRENT STEP:", session.step);
 
     ////////////////////////////////////////////////////
     // STEP 0 — GREETING (BUTTONS)
@@ -109,30 +114,31 @@ app.post("/webhook", async (req, res) => {
         .update({ step: 1 })
         .eq("customer_phone", from);
 
+      console.log("SENT: greeting buttons → step 1");
       return res.sendStatus(200);
     }
 
     ////////////////////////////////////////////////////
-    // STEP 1 — PROBLEM TYPE
+    // STEP 1 — CAPTURE PROBLEM TYPE FROM BUTTON
     ////////////////////////////////////////////////////
 
     if (session.step === 1) {
 
+      console.log("PROBLEM TYPE SELECTED:", text);
+
       await supabase
         .from("job_sessions")
-        .update({
-          problem_type: text,
-          step: 2
-        })
+        .update({ problem_type: text, step: 2 })
         .eq("customer_phone", from);
 
       await sendWhatsApp(from, "Got it 👍 Let me ask a few quick questions...");
 
+      console.log("STEP → 2, problem_type:", text);
       return res.sendStatus(200);
     }
 
     ////////////////////////////////////////////////////
-    // IMAGE HANDLING — BUG FIX 4: guard with step >= 2
+    // IMAGE HANDLING (only after problem type is set)
     ////////////////////////////////////////////////////
 
     if (message.type === "image" && session.step >= 2) {
@@ -141,9 +147,7 @@ app.post("/webhook", async (req, res) => {
 
       const imageRes = await axios.get(
         `https://graph.facebook.com/v18.0/${imageId}`,
-        {
-          headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
-        }
+        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
       );
 
       const imageUrl = imageRes.data.url;
@@ -154,73 +158,70 @@ app.post("/webhook", async (req, res) => {
 
       await supabase
         .from("job_sessions")
-        .update({
-          ai_detected: detectedProblem
-        })
+        .update({ ai_detected: detectedProblem })
         .eq("customer_phone", from);
 
-      await sendWhatsApp(
-        from,
-        `I detected: ${detectedProblem}\n\nLet me confirm a few details...`
-      );
+      await sendWhatsApp(from, `I detected: ${detectedProblem}\n\nLet me confirm a few details...`);
 
       return res.sendStatus(200);
     }
 
     ////////////////////////////////////////////////////
-    // DYNAMIC QUESTIONS
+    // DYNAMIC QUESTIONS (step 2 to 98)
     ////////////////////////////////////////////////////
 
     if (session.step >= 2 && session.step < 99) {
 
-      const { data: questions } = await supabase
+      console.log("FETCHING QUESTIONS for problem_type:", session.problem_type);
+
+      const { data: questions, error: qError } = await supabase
         .from("questions")
         .select("*")
         .eq("problem_type", session.problem_type)
         .order("step", { ascending: true });
 
+      console.log("QUESTIONS FOUND:", questions?.length ?? 0);
+      if (qError) console.log("QUESTIONS ERROR:", qError.message);
+      if (questions) console.log("QUESTIONS DATA:", JSON.stringify(questions));
+
       if (!questions || questions.length === 0) {
-        await sendWhatsApp(from, "No questions configured.");
+        console.log("⚠️ No questions for:", session.problem_type);
+        await sendWhatsApp(from, "⚠️ No questions found. Please contact us directly.");
+        await supabase
+          .from("job_sessions")
+          .update({ step: 99 })
+          .eq("customer_phone", from);
         return res.sendStatus(200);
       }
 
       const index = session.step - 2;
+      console.log("QUESTION INDEX:", index);
 
-      // BUG FIX 3: Save answer for ALL questions (index >= 0, not > 0)
-      if (index >= 0 && questions[index - 1]) {
-
+      // Save the answer to the previous question
+      if (index > 0 && questions[index - 1]) {
         const field = questions[index - 1].field;
-
-        const updatedAnswers = {
-          ...session.answers,
-          [field]: text
-        };
-
+        const updatedAnswers = { ...session.answers, [field]: text };
         await supabase
           .from("job_sessions")
           .update({ answers: updatedAnswers })
           .eq("customer_phone", from);
-
         session.answers = updatedAnswers;
+        console.log("SAVED ANSWER:", field, "=", text);
       }
 
-      // ASK NEXT QUESTION
+      // Ask the next question
       if (questions[index]) {
-
         await sendWhatsApp(from, questions[index].question);
-
         await supabase
           .from("job_sessions")
           .update({ step: session.step + 1 })
           .eq("customer_phone", from);
-
+        console.log("ASKED:", questions[index].question, "→ step", session.step + 1);
         return res.sendStatus(200);
       }
 
-		console.log("SESSION:", session);
-		console.log("QUESTIONS:", questions);
       ////////////////////////////////////////////////////
-      // ALL QUESTIONS DONE — save last answer, then quote
+      // ALL QUESTIONS DONE — save last answer then quote
       ////////////////////////////////////////////////////
 
       if (questions[index - 1]) {
@@ -231,14 +232,15 @@ app.post("/webhook", async (req, res) => {
           .update({ answers: updatedAnswers })
           .eq("customer_phone", from);
         session.answers = updatedAnswers;
+        console.log("SAVED LAST ANSWER:", field, "=", text);
       }
 
       const aiProblem = session.ai_detected || session.problem_type;
-
       const quote = generateQuote(aiProblem, session.answers);
 
-      await sendWhatsApp(
-        from,
+      console.log("QUOTE:", JSON.stringify(quote));
+
+      await sendWhatsApp(from,
 `💰 PipePal Estimate
 
 Problem: ${aiProblem}
@@ -254,50 +256,59 @@ Reply YES to book or RESTART to start over`
         .update({ step: 99 })
         .eq("customer_phone", from);
 
+      console.log("QUOTE SENT → step 99");
       return res.sendStatus(200);
     }
 
     ////////////////////////////////////////////////////
-    // BOOKING — BUG FIX 2: step 99 and 100 properly handled
+    // STEP 99 — AWAIT YES
     ////////////////////////////////////////////////////
 
     if (session.step === 99) {
 
       if (text === "yes") {
-
         await sendButtons(from, "When should we come?", [
           { id: "morning", title: "Morning" },
           { id: "afternoon", title: "Afternoon" }
         ]);
-
         await supabase
           .from("job_sessions")
           .update({ step: 100 })
           .eq("customer_phone", from);
-
+        console.log("TIME SLOT buttons sent → step 100");
         return res.sendStatus(200);
       }
+
+      await sendWhatsApp(from, "Reply YES to confirm your booking, or RESTART to start over.");
+      return res.sendStatus(200);
     }
+
+    ////////////////////////////////////////////////////
+    // STEP 100 — CAPTURE TIME SLOT
+    ////////////////////////////////////////////////////
 
     if (session.step === 100) {
 
-      const timeSlot = text; // "morning" or "afternoon" from button reply
+      const timeSlot = text;
 
       await supabase
         .from("job_sessions")
         .update({ time_slot: timeSlot, step: 101 })
         .eq("customer_phone", from);
 
-      await sendWhatsApp(
-        from,
+      await sendWhatsApp(from,
         `✅ Booked! A plumber will contact you to confirm your ${timeSlot} appointment.\n\nThank you for using PipePal ZA 🇿🇦`
       );
 
+      console.log("BOOKING CONFIRMED:", timeSlot, "→ step 101");
       return res.sendStatus(200);
     }
 
+    console.log("No handler matched for step:", session.step, "text:", text);
+
   } catch (error) {
-    console.error("❌ ERROR:", error);
+    console.error("❌ ERROR:", error.message);
+    console.error(error.stack);
   }
 
   res.sendStatus(200);
@@ -307,56 +318,56 @@ Reply YES to book or RESTART to start over`
 // SEND TEXT
 ////////////////////////////////////////////////////
 
-async function sendWhatsApp(to, text) {
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      text: { body: text }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
+async function sendWhatsApp(to, body) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to, text: { body } },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
       }
-    }
-  );
+    );
+  } catch (err) {
+    console.error("❌ sendWhatsApp failed:", err.response?.data || err.message);
+  }
 }
 
 ////////////////////////////////////////////////////
 // SEND BUTTONS
 ////////////////////////////////////////////////////
 
-async function sendButtons(to, text, buttons) {
-
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text },
-        action: {
-          buttons: buttons.map(b => ({
-            type: "reply",
-            reply: {
-              id: b.id,
-              title: b.title
-            }
-          }))
+async function sendButtons(to, bodyText, buttons) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text: bodyText },
+          action: {
+            buttons: buttons.map(b => ({
+              type: "reply",
+              reply: { id: b.id, title: b.title }
+            }))
+          }
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
         }
       }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
+    );
+  } catch (err) {
+    console.error("❌ sendButtons failed:", err.response?.data || err.message);
+  }
 }
 
 ////////////////////////////////////////////////////
@@ -364,7 +375,7 @@ async function sendButtons(to, text, buttons) {
 ////////////////////////////////////////////////////
 
 app.get("/", (req, res) => {
-  res.send("PipePal running");
+  res.send("PipePal ZA running ✅");
 });
 
 ////////////////////////////////////////////////////
