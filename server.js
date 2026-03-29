@@ -205,20 +205,20 @@ app.post("/webhook", async (req, res) => {
         console.log("SAVED ANSWER:", field, "=", text);
       }
 
-      // Ask the next question (or send with buttons if options exist)
+      // Ask the next question (with buttons if options exist)
       if (questions[index]) {
         const q = questions[index];
 
-        // options column: stored as comma-separated string e.g. "Kitchen,Bathroom,Outside,Other"
         const options = q.options
           ? q.options.split(",").map(o => o.trim()).filter(Boolean)
           : [];
 
         if (options.length >= 2 && options.length <= 3) {
-          // Send as buttons (WhatsApp max 3 buttons)
-          await sendButtons(from, q.question, options.map(o => ({ id: o.toLowerCase().replace(/\s+/g, "_"), title: o })));
+          await sendButtons(from, q.question, options.map(o => ({
+            id: o.toLowerCase().replace(/\s+/g, "_"),
+            title: o
+          })));
         } else {
-          // Send as plain text
           await sendWhatsApp(from, q.question);
         }
 
@@ -250,20 +250,31 @@ app.post("/webhook", async (req, res) => {
       }
 
       const aiProblem = session.ai_detected || session.problem_type;
-      const quote = generateQuote(aiProblem, session.answers);
+
+      // generateQuote is now async — reads live pricing from Supabase
+      const quote = await generateQuote(aiProblem);
 
       console.log("QUOTE:", JSON.stringify(quote));
 
-      await sendWhatsApp(from,
+      if (!quote || quote.totalLow === 0 && quote.totalHigh === 0) {
+        await sendWhatsApp(from,
+          "⚠️ Sorry, we couldn't generate a quote right now. Please contact us directly."
+        );
+      } else {
+        await sendWhatsApp(from,
 `💰 PipePal Estimate
 
 Problem: ${aiProblem}
 
-Estimated:
-R${quote.totalLow} – R${quote.totalHigh}
+Callout fee:  R${quote.callout}
+Materials:    R${quote.materials}
+Labour:       R${quote.labourLow} – R${quote.labourHigh}
+
+*Total: R${quote.totalLow} – R${quote.totalHigh}*
 
 Reply YES to book or RESTART to start over`
-      );
+        );
+      }
 
       await supabase
         .from("job_sessions")
@@ -367,7 +378,10 @@ async function sendButtons(to, bodyText, buttons) {
           action: {
             buttons: buttons.slice(0, 3).map(b => ({
               type: "reply",
-              reply: { id: b.id, title: b.title.substring(0, 20) }
+              reply: {
+                id: b.id,
+                title: b.title.substring(0, 20)
+              }
             }))
           }
         }
