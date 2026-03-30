@@ -177,7 +177,14 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 0) {
 
-      await sendButtons(from, "👋 Hi! I'm PipePal ZA 🇿🇦\n\nWhat problem do you have?", [
+      // Load company name for personalised messages
+      const { data: company } = await supabase
+        .from("company_profile")
+        .select("company_name")
+        .single();
+      const companyName = company?.company_name || "PipePal ZA";
+
+      await sendButtons(from, `👋 Hi! Thanks for calling *${companyName}*. I'm PipePal ZA 🇿🇦\n\nWhat problem do you have?`, [
         { id: "leak", title: "🔧 Leak" },
         { id: "blocked", title: "🚿 Blocked drain" },
         { id: "geyser", title: "🔥 Geyser" }
@@ -456,13 +463,20 @@ Reply *YES* to book or *RESTART* to start over`
 
       const timeSlot = text;
 
+      // Load company name
+      const { data: company100 } = await supabase
+        .from("company_profile")
+        .select("company_name")
+        .single();
+      const companyName = company100?.company_name || "PipePal ZA";
+
       await supabase
         .from("job_sessions")
         .update({ time_slot: timeSlot, step: 101 })
         .eq("customer_phone", from);
 
       await sendWhatsApp(from,
-        `✅ *Booked!* A plumber will contact you to confirm your ${timeSlot} appointment.\n\nThank you for using PipePal ZA 🇿🇦🔧`
+        `✅ *Booked!* ${companyName} will contact you to confirm your ${timeSlot} appointment.\n\nThank you for using PipePal ZA 🇿🇦🔧`
       );
 
       console.log("BOOKING CONFIRMED:", timeSlot, "→ step 101");
