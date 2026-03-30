@@ -251,6 +251,18 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 3) {
 
+      // Handle any skip button tap (both IDs)
+      if (text === "skip_photo" || text === "skip_photo_now") {
+        await sendWhatsApp(from, "No problem! Let me ask a few quick questions...");
+        await supabase
+          .from("job_sessions")
+          .update({ step: 4 })
+          .eq("customer_phone", from);
+        console.log("SKIPPED photo from step 3 → step 4");
+        return res.sendStatus(200);
+      }
+
+      // Handle photo sent
       if (message.type === "image") {
 
         const imageId = message.image.id;
@@ -280,22 +292,13 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // They sent text instead of a photo
+      // They sent something else — remind them
       await sendButtons(
         from,
         "Please send a photo 📸, or tap Skip to continue without one.",
         [{ id: "skip_photo_now", title: "Skip" }]
       );
 
-      return res.sendStatus(200);
-    }
-
-    if (text === "skip_photo_now" && session.step === 3) {
-      await sendWhatsApp(from, "No problem! Let me ask a few quick questions...");
-      await supabase
-        .from("job_sessions")
-        .update({ step: 4 })
-        .eq("customer_phone", from);
       return res.sendStatus(200);
     }
 
