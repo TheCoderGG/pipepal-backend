@@ -3,13 +3,15 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
+const FormData = require("form-data");
 
 const supabase = require("./supabaseClient");
 const generateQuote = require("./generateQuote");
 const analyzePlumbingPhoto = require("./analyzePlumbingPhoto");
 
 const app = express();
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: "20mb" }));
+app.use(bodyParser.urlencoded({ extended: true, limit: "20mb" }));
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -30,6 +32,82 @@ app.get("/webhook", (req, res) => {
   }
 
   res.sendStatus(403);
+});
+
+////////////////////////////////////////////////////
+// SEND PDF VIA WHATSAPP
+// Called by Base44 frontend with:
+// POST /send-document
+// Body: { to: "27841234567", pdfBase64: "...", filename: "RCP-001.pdf", caption: "Your receipt" }
+////////////////////////////////////////////////////
+
+app.post("/send-document", async (req, res) => {
+  try {
+    const { to, pdfBase64, filename, caption } = req.body;
+
+    if (!to || !pdfBase64 || !filename) {
+      return res.status(400).json({ error: "Missing required fields: to, pdfBase64, filename" });
+    }
+
+    console.log("📄 Sending PDF to:", to, "| File:", filename);
+
+    // Convert base64 to buffer
+    const pdfBuffer = Buffer.from(pdfBase64, "base64");
+
+    // Step 1 — Upload PDF to Meta media API
+    const formData = new FormData();
+    formData.append("messaging_product", "whatsapp");
+    formData.append("type", "application/pdf");
+    formData.append("file", pdfBuffer, {
+      filename: filename,
+      contentType: "application/pdf"
+    });
+
+    const uploadRes = await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/media`,
+      formData,
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          ...formData.getHeaders()
+        }
+      }
+    );
+
+    const mediaId = uploadRes.data.id;
+    console.log("✅ Media uploaded, ID:", mediaId);
+
+    // Step 2 — Send document message
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: to,
+        type: "document",
+        document: {
+          id: mediaId,
+          filename: filename,
+          caption: caption || "Please find your document attached."
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    console.log("✅ PDF sent to:", to);
+    return res.status(200).json({ success: true, message: "PDF sent successfully" });
+
+  } catch (err) {
+    console.error("❌ send-document failed:", err.response?.data || err.message);
+    return res.status(500).json({
+      error: "Failed to send PDF",
+      details: err.response?.data || err.message
+    });
+  }
 });
 
 ////////////////////////////////////////////////////
@@ -127,7 +205,6 @@ app.post("/webhook", async (req, res) => {
         .update({ problem_type: text, step: 2 })
         .eq("customer_phone", from);
 
-      // Ask if they want to add a photo
       await sendButtons(
         from,
         "Got it 👍\n\nWould you like to send a photo? 📸\n\nA photo helps us give you a more accurate quote.",
@@ -148,27 +225,21 @@ app.post("/webhook", async (req, res) => {
     if (session.step === 2) {
 
       if (text === "send_photo") {
-        // Ask them to send the photo
         await sendWhatsApp(from, "📸 Please send your photo now and I'll analyze it for you.");
-
         await supabase
           .from("job_sessions")
           .update({ step: 3 })
           .eq("customer_phone", from);
-
         console.log("WAITING for photo → step 3");
         return res.sendStatus(200);
       }
 
       if (text === "skip_photo") {
-        // Skip straight to questions
         await sendWhatsApp(from, "No problem! Let me ask a few quick questions...");
-
         await supabase
           .from("job_sessions")
           .update({ step: 4 })
           .eq("customer_phone", from);
-
         console.log("SKIPPED photo → step 4");
         return res.sendStatus(200);
       }
@@ -209,19 +280,16 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // They sent text instead of a photo — remind them
+      // They sent text instead of a photo
       await sendButtons(
         from,
         "Please send a photo 📸, or tap Skip to continue without one.",
-        [
-          { id: "skip_photo_now", title: "Skip" }
-        ]
+        [{ id: "skip_photo_now", title: "Skip" }]
       );
 
       return res.sendStatus(200);
     }
 
-    // Handle late skip from step 3 reminder
     if (text === "skip_photo_now" && session.step === 3) {
       await sendWhatsApp(from, "No problem! Let me ask a few quick questions...");
       await supabase
@@ -273,7 +341,7 @@ app.post("/webhook", async (req, res) => {
         console.log("SAVED ANSWER:", field, "=", text);
       }
 
-      // Ask the next question (with buttons if options exist)
+      // Ask the next question
       if (questions[index]) {
         const q = questions[index];
 
@@ -300,7 +368,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       ////////////////////////////////////////////////////
-      // ALL QUESTIONS DONE — save last answer then quote
+      // ALL QUESTIONS DONE — generate quote
       ////////////////////////////////////////////////////
 
       console.log("ALL QUESTIONS DONE — generating quote");
