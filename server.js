@@ -52,7 +52,6 @@ app.post("/webhook", async (req, res) => {
 
     const from = message.from;
 
-    // Button replies come as-is; text is lowercased
     const isButtonReply = !!message.interactive?.button_reply?.id;
     const text = isButtonReply
       ? message.interactive.button_reply.id
@@ -101,9 +100,9 @@ app.post("/webhook", async (req, res) => {
     if (session.step === 0) {
 
       await sendButtons(from, "👋 Hi! I'm PipePal ZA 🇿🇦\n\nWhat problem do you have?", [
-        { id: "leak", title: "Leak" },
-        { id: "blocked", title: "Blocked drain" },
-        { id: "geyser", title: "Geyser" }
+        { id: "leak", title: "🔧 Leak" },
+        { id: "blocked", title: "🚿 Blocked drain" },
+        { id: "geyser", title: "🔥 Geyser" }
       ]);
 
       await supabase
@@ -116,7 +115,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     ////////////////////////////////////////////////////
-    // STEP 1 — CAPTURE PROBLEM TYPE
+    // STEP 1 — CAPTURE PROBLEM TYPE, THEN ASK FOR PHOTO
     ////////////////////////////////////////////////////
 
     if (session.step === 1) {
@@ -128,46 +127,115 @@ app.post("/webhook", async (req, res) => {
         .update({ problem_type: text, step: 2 })
         .eq("customer_phone", from);
 
-      await sendWhatsApp(from, "Got it 👍 Let me ask a few quick questions...");
-
-      console.log("STEP → 2, problem_type:", text);
-      return res.sendStatus(200);
-    }
-
-    ////////////////////////////////////////////////////
-    // IMAGE HANDLING
-    ////////////////////////////////////////////////////
-
-    if (message.type === "image" && session.step >= 2) {
-
-      const imageId = message.image.id;
-
-      const imageRes = await axios.get(
-        `https://graph.facebook.com/v18.0/${imageId}`,
-        { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+      // Ask if they want to add a photo
+      await sendButtons(
+        from,
+        "Got it 👍\n\nWould you like to send a photo? 📸\n\nA photo helps us give you a more accurate quote.",
+        [
+          { id: "send_photo", title: "📸 Add photo" },
+          { id: "skip_photo", title: "Skip" }
+        ]
       );
 
-      const imageUrl = imageRes.data.url;
-
-      await sendWhatsApp(from, "🔎 Analyzing your photo...");
-
-      const detectedProblem = await analyzePlumbingPhoto(imageUrl);
-
-      await supabase
-        .from("job_sessions")
-        .update({ ai_detected: detectedProblem })
-        .eq("customer_phone", from);
-
-      await sendWhatsApp(from, `I detected: ${detectedProblem}\n\nLet me confirm a few details...`);
-
+      console.log("ASKED: photo prompt → step 2");
       return res.sendStatus(200);
     }
 
     ////////////////////////////////////////////////////
-    // DYNAMIC QUESTIONS (step 2 to 98)
+    // STEP 2 — HANDLE PHOTO CHOICE
     ////////////////////////////////////////////////////
 
-    if (session.step >= 2 && session.step < 99) {
+    if (session.step === 2) {
+
+      if (text === "send_photo") {
+        // Ask them to send the photo
+        await sendWhatsApp(from, "📸 Please send your photo now and I'll analyze it for you.");
+
+        await supabase
+          .from("job_sessions")
+          .update({ step: 3 })
+          .eq("customer_phone", from);
+
+        console.log("WAITING for photo → step 3");
+        return res.sendStatus(200);
+      }
+
+      if (text === "skip_photo") {
+        // Skip straight to questions
+        await sendWhatsApp(from, "No problem! Let me ask a few quick questions...");
+
+        await supabase
+          .from("job_sessions")
+          .update({ step: 4 })
+          .eq("customer_phone", from);
+
+        console.log("SKIPPED photo → step 4");
+        return res.sendStatus(200);
+      }
+    }
+
+    ////////////////////////////////////////////////////
+    // STEP 3 — WAITING FOR PHOTO
+    ////////////////////////////////////////////////////
+
+    if (session.step === 3) {
+
+      if (message.type === "image") {
+
+        const imageId = message.image.id;
+
+        const imageRes = await axios.get(
+          `https://graph.facebook.com/v18.0/${imageId}`,
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+        );
+
+        const imageUrl = imageRes.data.url;
+
+        await sendWhatsApp(from, "🔎 Analyzing your photo...");
+
+        const detectedProblem = await analyzePlumbingPhoto(imageUrl);
+
+        await supabase
+          .from("job_sessions")
+          .update({ ai_detected: detectedProblem, step: 4 })
+          .eq("customer_phone", from);
+
+        await sendWhatsApp(
+          from,
+          `✅ Got it! I can see: *${detectedProblem}*\n\nLet me ask a few quick questions to complete your quote...`
+        );
+
+        console.log("PHOTO ANALYZED:", detectedProblem, "→ step 4");
+        return res.sendStatus(200);
+      }
+
+      // They sent text instead of a photo — remind them
+      await sendButtons(
+        from,
+        "Please send a photo 📸, or tap Skip to continue without one.",
+        [
+          { id: "skip_photo_now", title: "Skip" }
+        ]
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // Handle late skip from step 3 reminder
+    if (text === "skip_photo_now" && session.step === 3) {
+      await sendWhatsApp(from, "No problem! Let me ask a few quick questions...");
+      await supabase
+        .from("job_sessions")
+        .update({ step: 4 })
+        .eq("customer_phone", from);
+      return res.sendStatus(200);
+    }
+
+    ////////////////////////////////////////////////////
+    // STEP 4+ — DYNAMIC QUESTIONS
+    ////////////////////////////////////////////////////
+
+    if (session.step >= 4 && session.step < 99) {
 
       console.log("FETCHING QUESTIONS for problem_type:", session.problem_type);
 
@@ -190,7 +258,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      const index = session.step - 2;
+      const index = session.step - 4;
       console.log("QUESTION INDEX:", index, "| Total questions:", questions.length);
 
       // Save the answer to the previous question
@@ -237,7 +305,6 @@ app.post("/webhook", async (req, res) => {
 
       console.log("ALL QUESTIONS DONE — generating quote");
 
-      // Save the final answer
       if (index > 0 && questions[index - 1]) {
         const field = questions[index - 1].field;
         const updatedAnswers = { ...session.answers, [field]: text };
@@ -250,29 +317,31 @@ app.post("/webhook", async (req, res) => {
       }
 
       const aiProblem = session.ai_detected || session.problem_type;
-
-      // generateQuote is now async — reads live pricing from Supabase
       const quote = await generateQuote(aiProblem);
 
       console.log("QUOTE:", JSON.stringify(quote));
 
-      if (!quote || quote.totalLow === 0 && quote.totalHigh === 0) {
+      if (!quote || (quote.totalLow === 0 && quote.totalHigh === 0)) {
         await sendWhatsApp(from,
           "⚠️ Sorry, we couldn't generate a quote right now. Please contact us directly."
         );
       } else {
+        const photoNote = session.ai_detected
+          ? `📸 AI detected: _${session.ai_detected}_\n\n`
+          : "";
+
         await sendWhatsApp(from,
-`💰 PipePal Estimate
+`💰 *PipePal Estimate*
 
-Problem: ${aiProblem}
+${photoNote}Problem: ${aiProblem}
 
-Callout fee:  R${quote.callout}
-Materials:    R${quote.materials}
-Labour:       R${quote.labourLow} – R${quote.labourHigh}
+🔧 Callout fee:  R${quote.callout}
+🪛 Materials:    R${quote.materials}
+👷 Labour:       R${quote.labourLow} – R${quote.labourHigh}
 
 *Total: R${quote.totalLow} – R${quote.totalHigh}*
 
-Reply YES to book or RESTART to start over`
+Reply *YES* to book or *RESTART* to start over`
         );
       }
 
@@ -293,8 +362,8 @@ Reply YES to book or RESTART to start over`
 
       if (text === "yes") {
         await sendButtons(from, "When should we come?", [
-          { id: "morning", title: "Morning" },
-          { id: "afternoon", title: "Afternoon" }
+          { id: "morning", title: "🌅 Morning" },
+          { id: "afternoon", title: "🌆 Afternoon" }
         ]);
         await supabase
           .from("job_sessions")
@@ -304,7 +373,7 @@ Reply YES to book or RESTART to start over`
         return res.sendStatus(200);
       }
 
-      await sendWhatsApp(from, "Reply YES to confirm your booking, or RESTART to start over.");
+      await sendWhatsApp(from, "Reply *YES* to confirm your booking, or *RESTART* to start over.");
       return res.sendStatus(200);
     }
 
@@ -322,7 +391,7 @@ Reply YES to book or RESTART to start over`
         .eq("customer_phone", from);
 
       await sendWhatsApp(from,
-        `✅ Booked! A plumber will contact you to confirm your ${timeSlot} appointment.\n\nThank you for using PipePal ZA 🇿🇦`
+        `✅ *Booked!* A plumber will contact you to confirm your ${timeSlot} appointment.\n\nThank you for using PipePal ZA 🇿🇦🔧`
       );
 
       console.log("BOOKING CONFIRMED:", timeSlot, "→ step 101");
